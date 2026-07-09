@@ -144,7 +144,7 @@ export interface AppConfig {
 }
 
 const DEFAULT_CONFIG: AppConfig = {
-  version: '2.1.0',
+  version: '2.5',
   environment: 'production',
   app: {
     name: 'GhostVault',
@@ -155,7 +155,7 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   logging: {
     enableFileLogging: true,
-    logDirectory: 'C:\\ghostvault-main\\ghostghostvault_temp\\app logs',
+    logDirectory: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\app logs',
     minLevel: 'debug',
     enableConsole: true,
     enableStorage: false,
@@ -180,14 +180,14 @@ const DEFAULT_CONFIG: AppConfig = {
     logRetentionDays: 30
   },
   paths: {
-    tempBase: 'C:\\ghostvault-main\\ghostghostvault_temp',
-    tempDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\temp',
-    logsDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\logs',
-    appLogsDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\app logs',
-    nodeCompileCache: 'C:\\ghostvault-main\\ghostghostvault_temp\\node-compile-cache',
-    dataDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\data',
-    backupDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\backups',
-    cacheDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\cache'
+    tempBase: 'C:\\ghostvault-main\\ghost\\ghostvault_temp',
+    tempDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\temp',
+    logsDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\logs',
+    appLogsDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\app logs',
+    nodeCompileCache: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\node-compile-cache',
+    dataDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\data',
+    backupDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\backups',
+    cacheDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\cache'
   },
   installer: {
     installPath: 'C:\\ghostvault',
