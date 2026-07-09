@@ -2,19 +2,19 @@
  * MODULE: XChaCha20-Poly1305 Encryption
  *
  * Verantwoordelijkheid:
- *  - XChaCha20-Poly1305 encryptie/decryptie
- *  - Streaming ondersteuning
- *  - Parallel chunk encryptie
- *  - AAD metadata voor integriteit
- *  - HMAC-SHA256 voor extra authenticatie
+ * - XChaCha20-Poly1305 encryptie/decryptie
+ * - Streaming ondersteuning
+ * - Parallel chunk encryptie
+ * - AAD metadata voor integriteit
+ * - HMAC-SHA256 voor extra authenticatie
  *
  * Gebruikt door:
- *  - core/format/packer.ts
- *  - core/format/unpacker.ts
+ * - core/format/packer.ts
+ * - core/format/unpacker.ts
  *
  * Afhankelijk van:
- *  - @noble/ciphers
- *  - core/crypto/kdf/argon2id.ts
+ * - @noble/ciphers
+ * - core/crypto/kdf/argon2id.ts
  *
  * @module core/crypto/encryption/xchacha20
  */
@@ -79,7 +79,7 @@ export interface AADMetadata {
  */
 function encodeAAD(metadata: AADMetadata): Uint8Array {
   const parts: string[] = [];
-  
+
   if (metadata.fileName) {
     parts.push(`fn:${metadata.fileName}`);
   }
@@ -95,7 +95,7 @@ function encodeAAD(metadata: AADMetadata): Uint8Array {
   if (metadata.checksum) {
     parts.push(`cs:${metadata.checksum}`);
   }
-  
+
   return new TextEncoder().encode(parts.join('|'));
 }
 
@@ -106,7 +106,7 @@ function decodeAAD(aad: Uint8Array): AADMetadata {
   const text = new TextDecoder().decode(aad);
   const parts = text.split('|');
   const metadata: AADMetadata = {};
-  
+
   for (const part of parts) {
     const [key, value] = part.split(':');
     switch (key) {
@@ -127,7 +127,7 @@ function decodeAAD(aad: Uint8Array): AADMetadata {
         break;
     }
   }
-  
+
   return metadata;
 }
 
@@ -184,17 +184,17 @@ async function verifyHMAC(key: Uint8Array, data: Uint8Array, expectedHMAC: Uint8
   }
 
   const calculatedHMAC = await calculateHMAC(key, data);
-  
+
   // Constant-time comparison to prevent timing attacks
   if (calculatedHMAC.length !== expectedHMAC.length) {
     return false;
   }
-  
+
   let result = 0;
   for (let i = 0; i < calculatedHMAC.length; i++) {
     result |= calculatedHMAC[i]! ^ expectedHMAC[i]!;
   }
-  
+
   return result === 0;
 }
 
@@ -289,15 +289,15 @@ export async function decryptXChaCha20(
   // Validate metadata if provided
   if (expectedMetadata && aad) {
     const decodedMetadata = decodeAAD(aad);
-    
+
     if (expectedMetadata.fileName && decodedMetadata.fileName !== expectedMetadata.fileName) {
       throw new Error('Filename mismatch in AAD');
     }
-    
+
     if (expectedMetadata.timestamp && decodedMetadata.timestamp !== expectedMetadata.timestamp) {
       throw new Error('Timestamp mismatch in AAD');
     }
-    
+
     if (expectedMetadata.chunkIndex !== undefined && decodedMetadata.chunkIndex !== expectedMetadata.chunkIndex) {
       throw new Error('Chunk index mismatch in AAD');
     }
@@ -309,6 +309,9 @@ export async function decryptXChaCha20(
 /**
  * Parallel encryptie van meerdere chunks met AAD metadata en HMAC-SHA256
  * Optimized: Batch processing with controlled concurrency
+ *
+ * NOTE: All chunks are processed. Memory is bounded by BATCH_SIZE batching
+ * below, so there is no artificial cap that would silently drop chunks.
  */
 export async function encryptChunksParallel(
   key: Uint8Array,
@@ -318,24 +321,16 @@ export async function encryptChunksParallel(
   timestamp?: number,
   enableHMAC: boolean = true
 ): Promise<XChaChaResult[]> {
-  // Limit concurrent encryption to prevent memory issues
-  const MAX_CONCURRENT = 10000;
-  const chunksToProcess = chunks.length > MAX_CONCURRENT ? chunks.slice(0, MAX_CONCURRENT) : chunks;
-
-  if (chunks.length > MAX_CONCURRENT) {
-    console.warn(`Extreme chunk count (${chunks.length}), encrypting only first ${MAX_CONCURRENT} chunks`);
-  }
-
-  const totalChunks = chunksToProcess.length;
+  const totalChunks = chunks.length;
   const timestampValue = timestamp ?? Date.now();
 
   // Process chunks in batches to avoid overwhelming the event loop
   const BATCH_SIZE = 100;
   const results: XChaChaResult[] = [];
 
-  for (let batchStart = 0; batchStart < chunksToProcess.length; batchStart += BATCH_SIZE) {
-    const batchEnd = Math.min(batchStart + BATCH_SIZE, chunksToProcess.length);
-    const batch = chunksToProcess.slice(batchStart, batchEnd);
+  for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH_SIZE) {
+    const batchEnd = Math.min(batchStart + BATCH_SIZE, chunks.length);
+    const batch = chunks.slice(batchStart, batchEnd);
 
     const batchPromises = batch.map(async (chunk, batchIndex) => {
       const index = batchStart + batchIndex;
