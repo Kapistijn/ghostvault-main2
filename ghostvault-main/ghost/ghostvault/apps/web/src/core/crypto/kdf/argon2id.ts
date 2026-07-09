@@ -2,16 +2,16 @@
  * MODULE: Argon2id Key Derivation
  *
  * Verantwoordelijkheid:
- *  - Argon2id KDF implementatie
- *  - Vervangt PBKDF2 voor betere beveiliging
- *  - Parameters: t=3, m=64MB, p=4
+ * - Argon2id KDF implementatie
+ * - Vervangt PBKDF2 voor betere beveiliging
+ * - Parameters: t=3, m=64MB, p=4
  *
  * Gebruikt door:
- *  - core/crypto/encryption/xchacha20.ts
- *  - core/format/packer.ts
+ * - core/crypto/encryption/xchacha20.ts
+ * - core/format/packer.ts
  *
  * Afhankelijk van:
- *  - argon2-browser
+ * - argon2-browser
  *
  * @module core/crypto/kdf/argon2id
  */
@@ -39,16 +39,32 @@ const DEFAULT_PARAMS: Omit<Argon2idParams, 'salt'> = {
 };
 
 /**
+ * Encode raw salt bytes into a lossless binary (Latin1) string.
+ *
+ * argon2-browser accepts the salt as a string. Decoding random bytes as
+ * UTF-8 is lossy (invalid sequences become U+FFFD), which destroys salt
+ * entropy. Mapping each byte to a char code preserves all 256 byte values
+ * 1:1 and is fully deterministic across pack/unpack.
+ */
+function saltToBinaryString(salt: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < salt.length; i++) {
+    out += String.fromCharCode(salt[i]!);
+  }
+  return out;
+}
+
+/**
  * Adaptive parameters op basis van device performance
  */
 export function getAdaptiveParams(): Partial<Argon2idParams> {
   // Detecteer device capabilities
   const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
   const isLowEnd = navigator.hardwareConcurrency && navigator.hardwareConcurrency < 4;
-  
+
   // Validate hardwareConcurrency
   const cores = navigator.hardwareConcurrency || 4;
-  
+
   if (isMobile || isLowEnd) {
     return {
       iterations: Math.max(1, Math.min(2, 10)), // Clamp between 1-10
@@ -56,7 +72,7 @@ export function getAdaptiveParams(): Partial<Argon2idParams> {
       parallelism: Math.max(1, Math.min(2, cores)), // Clamp between 1 and available cores
     };
   }
-  
+
   // High-end device
   if (cores >= 8) {
     return {
@@ -65,7 +81,7 @@ export function getAdaptiveParams(): Partial<Argon2idParams> {
       parallelism: Math.max(1, Math.min(6, cores)), // Clamp between 1 and available cores
     };
   }
-  
+
   // Default (mid-range)
   return {
     iterations: Math.max(1, Math.min(3, 10)), // Clamp between 1-10
@@ -94,7 +110,7 @@ export async function deriveKeyArgon2id(
 
   const result = await argon2.hash({
     pass: password,
-    salt: new TextDecoder().decode(salt),
+    salt: saltToBinaryString(salt),
     type: argon2.ArgonType.Argon2id,
     mem: finalParams.memory,
     time: finalParams.iterations,
@@ -122,20 +138,20 @@ export async function deriveSubKeys(
   if (!masterKey || masterKey.length === 0) {
     throw new Error('Master key cannot be empty');
   }
-  
+
   if (typeof masterKey.length !== 'number' || masterKey.length < 16) {
     throw new Error('Master key must be at least 16 bytes');
   }
-  
+
   // Validate labels
   if (!labels || labels.length === 0) {
     throw new Error('Labels array cannot be empty');
   }
-  
+
   if (!Array.isArray(labels)) {
     throw new Error('Labels must be an array');
   }
-  
+
   const subKeys: Uint8Array[] = [];
 
   // Gebruik Web Crypto API's HKDF voor betere security
@@ -144,7 +160,7 @@ export async function deriveSubKeys(
     if (typeof label !== 'string' || label.length === 0) {
       throw new Error('Each label must be a non-empty string');
     }
-    
+
     const labelBytes = new TextEncoder().encode(label);
     const info = labelBytes;
 
