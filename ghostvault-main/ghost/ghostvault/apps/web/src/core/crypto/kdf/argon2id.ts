@@ -18,6 +18,17 @@
 
 import * as argon2 from 'argon2-browser';
 
+/**
+ * Argon2id variant id.
+ *
+ * The bundled ESM build of argon2-browser does not always expose the
+ * ArgonType enum on the namespace import, which caused a hard runtime
+ * crash ("Cannot read properties of undefined (reading 'Argon2id')").
+ * Resolve it defensively and fall back to the known enum value: in
+ * argon2-browser ArgonType is { Argon2d: 0, Argon2i: 1, Argon2id: 2 }.
+ */
+const ARGON2ID_TYPE: number = (argon2 as any)?.ArgonType?.Argon2id ?? 2;
+
 export interface Argon2idParams {
   salt?: Uint8Array;
   iterations: number;
@@ -111,7 +122,7 @@ export async function deriveKeyArgon2id(
   const result = await argon2.hash({
     pass: password,
     salt: saltToBinaryString(salt),
-    type: argon2.ArgonType.Argon2id,
+    type: ARGON2ID_TYPE,
     mem: finalParams.memory,
     time: finalParams.iterations,
     parallelism: finalParams.parallelism,
