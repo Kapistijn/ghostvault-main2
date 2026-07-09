@@ -29,6 +29,13 @@ import * as argon2 from 'argon2-browser';
  */
 const ARGON2ID_TYPE: number = (argon2 as any)?.ArgonType?.Argon2id ?? 2;
 
+/**
+ * Salt size in bytes. MUST match SALT_BYTES in the .ghost format (v6 = 64),
+ * otherwise pack derives the key from a different-length salt than unpack
+ * and every decryption fails.
+ */
+const SALT_LENGTH = 64;
+
 export interface Argon2idParams {
   salt?: Uint8Array;
   iterations: number;
@@ -102,10 +109,10 @@ export function getAdaptiveParams(): Partial<Argon2idParams> {
 }
 
 /**
- * Genereer willekeurige salt
+ * Genereer willekeurige salt (64 bytes, conform het v6 .ghost formaat)
  */
 export function generateSalt(): Uint8Array {
-  return crypto.getRandomValues(new Uint8Array(32));
+  return crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
 }
 
 /**
@@ -138,7 +145,7 @@ export async function deriveKeyArgon2id(
 }
 
 /**
- * Derive meerdere sleutels van één master key (HKDF-style met SHA-256)
+ * Derive meerdere sleutels van een master key (HKDF-style met SHA-256)
  * Gebruikt Web Crypto API's HKDF voor betere security
  */
 export async function deriveSubKeys(

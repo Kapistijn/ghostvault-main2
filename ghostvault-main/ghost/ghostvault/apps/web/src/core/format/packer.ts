@@ -32,7 +32,7 @@ import { encryptXChaCha20, encryptChunksParallel } from '../crypto/encryption/xc
 import { wipeBuffers, AutoDeleteTimer } from '../security/memory-wipe.js';
 import { getAdaptiveChunkConfig, getWorkerCount } from '../stream/adaptive-chunk.js';
 import { openFileForWriting, writeStreamToDisk } from '../stream/file-system-access.js';
-import { encodeChunk, GHOST_MAGIC, GHOST_MAGIC_END, GHOST_VERSION, SALT_BYTES } from './ghost.js';
+import { encodeChunk, GHOST_MAGIC, GHOST_MAGIC_END, GHOST_VERSION, SALT_BYTES, MIN_PASSWORD_LENGTH } from './ghost.js';
 import { generateSalt, deriveKeyArgon2id, deriveSubKeys } from '../crypto/kdf/argon2id.js';
 import type { ChunkInfo } from '../types/index.js';
 import { EncryptionError, ValidationError, OperationCancelledError } from '../errors.js';
@@ -106,12 +106,12 @@ export async function packToGhostV5(
   }
 
   // Validate password
-  if (!options.noPasswordMode && (!options.password || options.password.length < 6)) {
-    throw new ValidationError('Wachtwoord moet minimaal 6 tekens zijn');
+  if (!options.noPasswordMode && (!options.password || options.password.length < MIN_PASSWORD_LENGTH)) {
+    throw new ValidationError(`Wachtwoord moet minimaal ${MIN_PASSWORD_LENGTH} tekens zijn`);
   }
 
-  if (options.enableDoubleEncryption && (!options.secondPassword || options.secondPassword.length < 6)) {
-    throw new ValidationError('Tweede wachtwoord moet minimaal 6 tekens zijn bij dubbele encryptie');
+  if (options.enableDoubleEncryption && (!options.secondPassword || options.secondPassword.length < MIN_PASSWORD_LENGTH)) {
+    throw new ValidationError(`Tweede wachtwoord moet minimaal ${MIN_PASSWORD_LENGTH} tekens zijn bij dubbele encryptie`);
   }
 
   // Validate file
@@ -154,7 +154,6 @@ export async function packToGhostV5(
   try {
     if (useStreamingMode) {
       // Streaming mode for large files - process in chunks to avoid memory issues
-      // Optimized: Pre-allocate buffer with reasonable size to reduce reallocations
       const BUFFER_GROWTH_FACTOR = 1.5;
       let buffer = new Uint8Array(CHUNK_READ_SIZE);
       let bufferSize = 0;
@@ -182,7 +181,7 @@ export async function packToGhostV5(
 
         // Process in chunks when buffer is large enough
         if (bufferSize >= CHUNK_READ_SIZE) {
-          const chunk = buffer.subarray(0, bufferSize);
+          const chunk = buffer.slice(0, bufferSize);
           compressedChunks.push(chunk);
           buffer = new Uint8Array(CHUNK_READ_SIZE);
           bufferCapacity = CHUNK_READ_SIZE;
@@ -200,7 +199,7 @@ export async function packToGhostV5(
 
       // Add remaining buffer
       if (bufferSize > 0) {
-        const chunk = buffer.subarray(0, bufferSize);
+        const chunk = buffer.slice(0, bufferSize);
         compressedChunks.push(chunk);
       }
     } else {
@@ -228,9 +227,8 @@ export async function packToGhostV5(
     reader.releaseLock();
   }
 
-  // Compress in parallel with adaptive level selection.
-  // Process ALL read chunks - concurrency is bounded inside compressParallel
-  // via workerCount, so there is no need to slice data away here.
+  // Compress ALL read chunks in parallel; concurrency is bounded inside
+  // compressParallel via workerCount, so nothing is sliced away.
   report('compressing', 30, 'Compresseren...');
 
   const compressed = await compressParallel(
@@ -241,7 +239,6 @@ export async function packToGhostV5(
   );
 
   // Calculate compression ratio
-  // Optimized: Direct calculation without intermediate array
   let originalSize = 0;
   let compressedSize = 0;
   for (let i = 0; i < compressedChunks.length; i++) {
@@ -273,7 +270,9 @@ export async function packToGhostV5(
   // Double encryption if enabled
   if (options.enableDoubleEncryption && options.secondPassword) {
     report('encrypting', 60, 'Dubbele encryptie toepassen...');
-    const secondSalt = generateSalt();
+    // Second salt is an explicit 32 bytes: the double-encryption marker below
+    // is 1 + 32 bytes, so it must not use the 64-byte generateSalt().
+    const secondSalt = crypto.getRandomValues(new Uint8Array(32));
     const secondKeyResult = await deriveKeyArgon2id(options.secondPassword, secondSalt);
     const secondSubKeys = await deriveSubKeys(secondKeyResult.hash, ['encryption']);
 
@@ -285,18 +284,14 @@ export async function packToGhostV5(
       Date.now()
     );
 
-    // Store second salt in header for decryption
-    // Merge results: use nonces from second encryption, ciphertext from second
-    encryptionResults = doubleEncrypted.map((result, i) => ({
+    encryptionResults = doubleEncrypted.map((result) => ({
       ciphertext: result.ciphertext,
-      nonce: result.nonce // Use nonce from second encryption
+      nonce: result.nonce
     }));
 
-    // Store second salt in the header instead of chunk data (better approach)
-    // For now, we'll prepend it to the first encrypted chunk for backward compatibility
-    // Future: Store in header field to avoid chunk modification issues
+    // Prepend a 1-byte marker + 32-byte second salt to the first chunk.
     if (encryptionResults.length > 0) {
-      const saltMarker = new Uint8Array(1 + 32); // 1 byte marker + 32 bytes salt
+      const saltMarker = new Uint8Array(1 + 32);
       saltMarker[0] = 0xFF; // Marker for double encryption
       saltMarker.set(secondSalt, 1);
 
@@ -332,7 +327,6 @@ export async function packToGhostV5(
 
   for (let i = 0; i < encryptedChunks.length; i++) {
     const chunk = encryptedChunks[i];
-    // Use subarray instead of copy to reduce memory allocation
     const chunkCopy = chunk.subarray(0);
     const sha256 = await crypto.subtle.digest('SHA-256', chunkCopy.buffer as ArrayBuffer);
 
@@ -345,9 +339,6 @@ export async function packToGhostV5(
     });
 
     offset += chunk.length;
-
-    // Free memory after each chunk
-    chunkCopy.fill(0);
   }
 
   report('writing', 90, 'Schrijven naar schijf...');
@@ -368,6 +359,19 @@ export async function packToGhostV5(
     }
   }
 
+  // Compute an integrity hash over the ORIGINAL file content so the unpacker
+  // can verify a correct round-trip. (Previously the footer hashed only the
+  // footer prefix, which could never match the decrypted output.)
+  const originalContent = new Uint8Array(totalBytes);
+  {
+    let p = 0;
+    for (let i = 0; i < compressedChunks.length; i++) {
+      originalContent.set(compressedChunks[i]!, p);
+      p += compressedChunks[i]!.length;
+    }
+  }
+  const contentHash = new Uint8Array(await crypto.subtle.digest('SHA-256', originalContent.buffer as ArrayBuffer));
+
   // Open file for writing
   const handle = await openFileForWriting(options.fileName || file.name + '.ghost');
 
@@ -386,7 +390,6 @@ export async function packToGhostV5(
     for (let i = 0; i < encryptedChunks.length; i++) {
       const chunk = encryptedChunks[i];
       const nonce = encryptionResults[i].nonce;
-      // Use subarray instead of copy to reduce memory allocation
       const chunkCopy = chunk.subarray(0);
       const chunkData = encodeChunk({
         chunkId: BigInt(i),
@@ -396,9 +399,6 @@ export async function packToGhostV5(
       });
 
       await handle.writable.write(chunkData as BufferSource);
-
-      // Free memory after each chunk
-      chunkCopy.fill(0);
     }
 
     // Write footer
@@ -409,9 +409,7 @@ export async function packToGhostV5(
     new DataView(footer.buffer, footer.byteOffset, footer.byteLength)
       .setBigUint64(GHOST_MAGIC_END.length + 8, BigInt(totalBytes), false);
 
-    const footerPrefix = footer.subarray(0, GHOST_MAGIC_END.length + 16);
-    const fileHash = await crypto.subtle.digest('SHA-256', footerPrefix.buffer.slice(footerPrefix.byteOffset, footerPrefix.byteOffset + footerPrefix.byteLength));
-    footer.set(new Uint8Array(fileHash), GHOST_MAGIC_END.length + 16);
+    footer.set(contentHash, GHOST_MAGIC_END.length + 16);
 
     await handle.writable.write(footer);
 
