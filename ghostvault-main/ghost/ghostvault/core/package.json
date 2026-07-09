@@ -1,0 +1,24 @@
+{
+  "name": "@ghostvault/core",
+  "version": "2.5",
+  "description": "GhostVault core library v2.5",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^0.5.0",
+    "@oneidentity/zstd-js": "^1.0.0",
+    "argon2-browser": "^1.18.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "jsdom": "^24.0.0"
+  }
+}

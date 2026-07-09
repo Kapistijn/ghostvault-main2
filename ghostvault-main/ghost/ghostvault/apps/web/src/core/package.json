@@ -1,0 +1,19 @@
+{
+  "name": "@ghostvault/core",
+  "version": "2.0.0",
+  "description": "GhostVault core library",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^0.5.0",
+    "@oneidentity/zstd-js": "^1.0.0",
+    "argon2-browser": "^1.18.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}
