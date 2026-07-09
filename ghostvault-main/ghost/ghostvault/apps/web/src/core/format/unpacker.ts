@@ -2,21 +2,21 @@
  * MODULE: Ghost Stream Unpacker
  *
  * Verantwoordelijkheid:
- *  - Streaming unpacking van .ghost bestanden
- *  - Decryptie pipeline orchestration
- *  - Chunk parsing en reconstructie
+ * - Streaming unpacking van .ghost bestanden
+ * - Decryptie pipeline orchestration
+ * - Chunk parsing en reconstructie
  *
  * Gebruikt door:
- *  - apps/web/src/ui/DecryptPanel
+ * - apps/web/src/ui/DecryptPanel
  *
  * Afhankelijk van:
- *  - core/crypto/compression/zstd.ts
- *  - core/crypto/encryption/xchacha20.ts
- *  - core/stream/file-system-access.ts
- *  - core/format/ghost.ts
- *  - core/crypto/kdf/argon2id.ts
- *  - core/errors.ts
- *  - jszip
+ * - core/crypto/compression/zstd.ts
+ * - core/crypto/encryption/xchacha20.ts
+ * - core/stream/file-system-access.ts
+ * - core/format/ghost.ts
+ * - core/crypto/kdf/argon2id.ts
+ * - core/errors.ts
+ * - jszip
  *
  * @module core/format/unpacker
  */
@@ -24,8 +24,9 @@
 import { decompressZstd, decompressParallel } from '../crypto/compression/zstd.js';
 import { decryptXChaCha20, decryptChunksParallel } from '../crypto/encryption/xchacha20.js';
 import { openFileForWriting, writeStreamToDisk } from '../stream/file-system-access.js';
-import { parseHeader, parseFooter, parseChunk, GHOST_VERSION } from './ghost.js';
+import { parseHeader, parseFooter, parseChunk, GHOST_VERSION, GHOST_HEADER_BYTES, MIN_PASSWORD_LENGTH } from './ghost.js';
 import { deriveKeyArgon2id, deriveSubKeys } from '../crypto/kdf/argon2id.js';
+import { getWorkerCount } from '../stream/adaptive-chunk.js';
 import type { ChunkInfo } from '../types/index.js';
 import { DecryptionError, ValidationError, OperationCancelledError } from '../errors.js';
 import JSZip from 'jszip';
@@ -88,8 +89,8 @@ export async function unpackGhostV5(
   }
 
   // Validate password
-  if (!options.password || options.password.length < 6) {
-    throw new ValidationError('Wachtwoord moet minimaal 6 tekens zijn');
+  if (!options.password || options.password.length < MIN_PASSWORD_LENGTH) {
+    throw new ValidationError(`Wachtwoord moet minimaal ${MIN_PASSWORD_LENGTH} tekens zijn`);
   }
 
   // Validate file
@@ -105,7 +106,6 @@ export async function unpackGhostV5(
   }
 
   // Read entire file (for now - will be improved to streaming)
-  // For extreme files, this may fail - implement streaming in future
   const buffer = new Uint8Array(await file.arrayBuffer());
 
   // Parse header
@@ -127,9 +127,11 @@ export async function unpackGhostV5(
 
   report('decrypting', 30, 'Sleutels afgeleid');
 
-  // Parse chunks with verification
+  // Parse chunks with verification. Chunk data starts right after the fixed
+  // header (magic + version + salt + opaqueLen). This MUST use the real
+  // header size (SALT_BYTES-aware) or every chunk parses out of alignment.
   const chunks: { ciphertext: Uint8Array; nonce: Uint8Array; sha256: Uint8Array }[] = [];
-  let offset = 5 + 1 + 32 + 4; // After header
+  let offset = GHOST_HEADER_BYTES;
   let corruptedChunks = 0;
 
   while (offset < buffer.length - footer.magicEnd.length - 8 - 8 - 32) {
@@ -140,18 +142,18 @@ export async function unpackGhostV5(
         nonce: chunk.nonce,
         sha256: chunk.sha256,
       });
+      offset += 8 + 24 + 4 + chunk.ciphertext.length + 32;
     } catch (error) {
       if (options.recoveryMode) {
         corruptedChunks++;
         console.warn(`Corrupted chunk at offset ${offset}, skipping in recovery mode`);
-        // Try to skip to next chunk by estimating chunk size
+        // Best-effort skip to the next plausible chunk boundary.
         offset += 8 + 24 + 4 + 32; // Minimum chunk size
         continue;
       } else {
         throw error;
       }
     }
-    offset += 8 + 24 + 4 + chunks[chunks.length - 1].ciphertext.length + 32;
   }
 
   if (options.recoveryMode && corruptedChunks > 0) {
@@ -160,13 +162,11 @@ export async function unpackGhostV5(
     report('decrypting', 40, `${chunks.length} chunks gevonden`);
   }
 
-  // Limit concurrent decryption for extreme file counts
-  const MAX_CONCURRENT_DECRYPTION = 1000;
-  const chunksToDecrypt = chunks.length > MAX_CONCURRENT_DECRYPTION
-    ? chunks.slice(0, MAX_CONCURRENT_DECRYPTION)
-    : chunks;
+  // Decrypt ALL chunks in parallel with AAD metadata validation.
+  // decryptChunksParallel batches internally, so there is no need for an
+  // artificial cap that would silently drop chunks (data loss).
+  const chunksToDecrypt = chunks;
 
-  // Decrypt chunks in parallel with AAD metadata validation
   report('decrypting', 45, 'Decrypten...');
   let decryptedChunks = await decryptChunksParallel(
     subKeys[0],
@@ -180,11 +180,11 @@ export async function unpackGhostV5(
     report('decrypting', 50, 'Dubbele decryptie toepassen...');
 
     // Validate second password
-    if (options.secondPassword.length < 6) {
-      throw new ValidationError('Tweede wachtwoord moet minimaal 6 tekens zijn');
+    if (options.secondPassword.length < MIN_PASSWORD_LENGTH) {
+      throw new ValidationError(`Tweede wachtwoord moet minimaal ${MIN_PASSWORD_LENGTH} tekens zijn`);
     }
-    
-    // Extract second salt from first chunk if present
+
+    // Extract second salt from first chunk if present (32-byte salt marker)
     let secondSalt: Uint8Array | null = null;
     if (decryptedChunks.length > 0 && decryptedChunks[0].length > 33) {
       const firstChunk = decryptedChunks[0];
@@ -194,14 +194,14 @@ export async function unpackGhostV5(
         decryptedChunks[0] = firstChunk.subarray(33);
       }
     }
-    
+
     if (!secondSalt) {
       throw new DecryptionError('Dubbele encryptie marker niet gevonden - bestand is niet dubbel versleuteld');
     }
-    
+
     const secondKeyResult = await deriveKeyArgon2id(options.secondPassword, secondSalt);
     const secondSubKeys = await deriveSubKeys(secondKeyResult.hash, ['encryption']);
-    
+
     decryptedChunks = await decryptChunksParallel(
       secondSubKeys[0],
       decryptedChunks.map((chunk, i) => ({ ciphertext: chunk, nonce: chunks[i].nonce })),
@@ -212,20 +212,17 @@ export async function unpackGhostV5(
 
   report('decompressing', 60, 'Gedecrypt');
 
-  // Decompress in parallel with memory limits
+  // Decompress ALL chunks in parallel. Worker count is bounded by
+  // getWorkerCount() - previously this passed `chunks.length - 2`, i.e. one
+  // worker per chunk, which could spawn thousands of workers.
   report('decompressing', 65, 'Decomprimeren...');
 
-  // Limit concurrent decompression for extreme file counts
-  const MAX_CONCURRENT_DECOMPRESSION = 100;
-  const chunksToDecompress = decryptedChunks.length > MAX_CONCURRENT_DECOMPRESSION
-    ? decryptedChunks.slice(0, MAX_CONCURRENT_DECOMPRESSION)
-    : decryptedChunks;
-
-  const originalSizes = chunksToDecompress.map(() => 0); // Will be determined during decompression
+  const chunksToDecompress = decryptedChunks;
+  const originalSizes = chunksToDecompress.map(() => 0); // Determined during decompression
   const decompressedChunks = await decompressParallel(
     chunksToDecompress,
     originalSizes,
-    Math.max(1, chunks.length - 2)
+    getWorkerCount()
   );
 
   // Calculate decompression ratio
@@ -233,10 +230,8 @@ export async function unpackGhostV5(
   const decompressedSize = decompressedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
   report('decompressing', 80, `Gedecomprimeerd: ${formatFileSize(decompressedSize)}`);
 
-  // Verify final file hash against footer
-  report('verifying', 85, 'Bestandsintegriteit verifiëren...');
-
   // Combine decompressed chunks into single buffer
+  report('verifying', 85, 'Bestandsintegriteit verifieren...');
   const totalSize = decompressedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const combinedBuffer = new Uint8Array(totalSize);
   let bufferOffset = 0;
@@ -245,15 +240,20 @@ export async function unpackGhostV5(
     bufferOffset += chunk.length;
   }
 
-  // Verify final file hash against footer
-  report('verifying', 90, 'Bestandsintegriteit verifiëren...');
-  const finalHash = await crypto.subtle.digest('SHA-256', combinedBuffer);
+  // Verify final file hash against footer. The footer now stores a hash of
+  // the ORIGINAL content, so this is a real end-to-end integrity check.
+  report('verifying', 90, 'Bestandsintegriteit verifieren...');
+  const finalHash = await crypto.subtle.digest('SHA-256', combinedBuffer.buffer as ArrayBuffer);
   const finalHashArray = new Uint8Array(finalHash);
   const footerHash = footer.fileHash;
 
   if (!bytesEqual(finalHashArray, footerHash)) {
-    console.warn('Final file hash mismatch - possible corruption detected');
-    report('verifying', 90, 'Waarschuwing: Hash mismatch gedetecteerd');
+    if (options.recoveryMode) {
+      console.warn('Final file hash mismatch - continuing due to recovery mode');
+      report('verifying', 90, 'Waarschuwing: hash mismatch (recovery mode)');
+    } else {
+      throw new DecryptionError('Bestandsintegriteit mislukt: hash mismatch. Bestand mogelijk beschadigd of verkeerd wachtwoord.');
+    }
   } else {
     report('verifying', 90, 'Bestandsintegriteit geverifieerd');
   }
@@ -331,13 +331,7 @@ export async function validateGhostV5(file: File): Promise<boolean> {
   try {
     const buffer = new Uint8Array(await file.arrayBuffer());
     const header = parseHeader(buffer);
-    const footer = parseFooter(buffer);
-
-    // Validate magic bytes
-    const magic = buffer.subarray(0, 5);
-    const magicEnd = buffer.subarray(buffer.length - 5);
-
-    // Simple validation - in production, verify full hash
+    parseFooter(buffer);
     return header.version === GHOST_VERSION;
   } catch {
     return false;
