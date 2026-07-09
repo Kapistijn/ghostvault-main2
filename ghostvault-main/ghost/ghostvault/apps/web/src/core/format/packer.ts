@@ -2,25 +2,25 @@
  * MODULE: Ghost Stream Packer
  *
  * Verantwoordelijkheid:
- *  - Streaming compressie van bestanden
- *  - Encryptie pipeline orchestration
- *  - Chunk creatie en serialisatie
+ * - Streaming compressie van bestanden
+ * - Encryptie pipeline orchestration
+ * - Chunk creatie en serialisatie
  *
  * Gebruikt door:
- *  - apps/web/src/ui/EncryptPanel
- *  - apps/web/src/ui/TrustedTransfer
+ * - apps/web/src/ui/EncryptPanel
+ * - apps/web/src/ui/TrustedTransfer
  *
  * Afhankelijk van:
- *  - core/crypto/compression/zstd.ts
- *  - core/crypto/encryption/xchacha20.ts
- *  - core/stream/adaptive-chunk.ts
- *  - core/stream/file-system-access.ts
- *  - core/format/ghost.ts
- *  - core/crypto/kdf/argon2id.ts
- *  - core/crypto/compression/multi-format.ts
- *  - core/crypto/deduplication.ts
- *  - core/security/memory-wipe.ts
- *  - core/errors.ts
+ * - core/crypto/compression/zstd.ts
+ * - core/crypto/encryption/xchacha20.ts
+ * - core/stream/adaptive-chunk.ts
+ * - core/stream/file-system-access.ts
+ * - core/format/ghost.ts
+ * - core/crypto/kdf/argon2id.ts
+ * - core/crypto/compression/multi-format.ts
+ * - core/crypto/deduplication.ts
+ * - core/security/memory-wipe.ts
+ * - core/errors.ts
  *
  * @module core/format/packer
  */
@@ -47,6 +47,17 @@ function formatFileSize(bytes: number): string {
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+/**
+ * Hex-encode raw bytes (lossless, unlike TextDecoder over binary data).
+ */
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i]!.toString(16).padStart(2, '0');
+  }
+  return hex;
 }
 
 export interface PackOptions {
@@ -217,17 +228,13 @@ export async function packToGhostV5(
     reader.releaseLock();
   }
 
-  // Compress in parallel with adaptive level selection
+  // Compress in parallel with adaptive level selection.
+  // Process ALL read chunks - concurrency is bounded inside compressParallel
+  // via workerCount, so there is no need to slice data away here.
   report('compressing', 30, 'Compresseren...');
 
-  // Limit concurrent compression for extreme file counts to avoid memory issues
-  const MAX_CONCURRENT_COMPRESSION = 100;
-  const chunksToCompress = compressedChunks.length > MAX_CONCURRENT_COMPRESSION
-    ? compressedChunks.slice(0, MAX_CONCURRENT_COMPRESSION)
-    : compressedChunks;
-
   const compressed = await compressParallel(
-    chunksToCompress,
+    compressedChunks,
     validateZstdLevel(options.compressionLevel),
     workerCount,
     true // use adaptive compression
@@ -253,16 +260,11 @@ export async function packToGhostV5(
   const keyResult = await deriveKeyArgon2id(options.password, salt);
   const subKeys = await deriveSubKeys(keyResult.hash, ['encryption', 'manifest']);
 
-  // Encrypt chunks in parallel with AAD metadata
-  // Limit concurrent encryption for extreme file counts
-  const MAX_CONCURRENT_ENCRYPTION = 1000;
-  const chunksToEncrypt = compressed.length > MAX_CONCURRENT_ENCRYPTION
-    ? compressed.slice(0, MAX_CONCURRENT_ENCRYPTION)
-    : compressed;
-
+  // Encrypt ALL chunks in parallel with AAD metadata. encryptChunksParallel
+  // batches internally, so we no longer slice chunks away.
   let encryptionResults = await encryptChunksParallel(
     subKeys[0],
-    chunksToEncrypt,
+    compressed,
     'GhostVault/v5/chunk',
     options.fileName,
     Date.now()
@@ -274,7 +276,7 @@ export async function packToGhostV5(
     const secondSalt = generateSalt();
     const secondKeyResult = await deriveKeyArgon2id(options.secondPassword, secondSalt);
     const secondSubKeys = await deriveSubKeys(secondKeyResult.hash, ['encryption']);
-    
+
     const doubleEncrypted = await encryptChunksParallel(
       secondSubKeys[0],
       encryptionResults.map(result => result.ciphertext),
@@ -282,12 +284,12 @@ export async function packToGhostV5(
       options.fileName,
       Date.now()
     );
-    
+
     // Store second salt in header for decryption
     // Merge results: use nonces from second encryption, ciphertext from second
     encryptionResults = doubleEncrypted.map((result, i) => ({
       ciphertext: result.ciphertext,
-      nonce: result.nonce  // Use nonce from second encryption
+      nonce: result.nonce // Use nonce from second encryption
     }));
 
     // Store second salt in the header instead of chunk data (better approach)
@@ -324,17 +326,11 @@ export async function packToGhostV5(
 
   report('chunking', 75, 'Chunks maken...');
 
-  // Create chunk manifest with memory-efficient approach for extreme file counts
+  // Create chunk manifest for every encrypted chunk.
   const chunkManifest: ChunkInfo[] = [];
   let offset = 0;
 
-  // Limit manifest size for extreme file counts
-  const MAX_MANIFEST_SIZE = 10000;
-  const chunksToManifest = encryptedChunks.length > MAX_MANIFEST_SIZE
-    ? encryptedChunks.slice(0, MAX_MANIFEST_SIZE)
-    : encryptedChunks;
-
-  for (let i = 0; i < chunksToManifest.length; i++) {
+  for (let i = 0; i < encryptedChunks.length; i++) {
     const chunk = encryptedChunks[i];
     // Use subarray instead of copy to reduce memory allocation
     const chunkCopy = chunk.subarray(0);
@@ -345,25 +341,13 @@ export async function packToGhostV5(
       offset,
       compressedSize: chunk.length,
       originalSize: compressedChunks[i].length,
-      sha256: new TextDecoder().decode(sha256),
+      sha256: bytesToHex(new Uint8Array(sha256)),
     });
 
     offset += chunk.length;
 
     // Free memory after each chunk
     chunkCopy.fill(0);
-  }
-
-  // If we have more chunks than manifest size, use simplified manifest
-  if (encryptedChunks.length > MAX_MANIFEST_SIZE) {
-    console.warn(`Extreme file count (${encryptedChunks.length}), using simplified manifest`);
-    chunkManifest.push({
-      id: -1, // Special marker for simplified manifest
-      offset: offset,
-      compressedSize: encryptedChunks.reduce((sum, chunk) => sum + chunk.length, 0),
-      originalSize: compressedChunks.reduce((sum, chunk) => sum + chunk.length, 0),
-      sha256: 'simplified',
-    });
   }
 
   report('writing', 90, 'Schrijven naar schijf...');
