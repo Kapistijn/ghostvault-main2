@@ -17,25 +17,20 @@
  * - core/stream/file-system-access.ts
  * - core/format/ghost.ts
  * - core/crypto/kdf/argon2id.ts
- * - core/crypto/compression/multi-format.ts
- * - core/crypto/deduplication.ts
- * - core/security/memory-wipe.ts
  * - core/errors.ts
  *
  * @module core/format/packer
  */
 
-import { compressZstd, compressParallel, validateZstdLevel } from '../crypto/compression/zstd.js';
-import { compressMultiFormat, type CompressionFormat } from '../crypto/compression/multi-format.js';
-import { deduplicateBlocks } from '../crypto/deduplication.js';
-import { encryptXChaCha20, encryptChunksParallel } from '../crypto/encryption/xchacha20.js';
-import { wipeBuffers, AutoDeleteTimer } from '../security/memory-wipe.js';
-import { getAdaptiveChunkConfig, getWorkerCount } from '../stream/adaptive-chunk.js';
-import { openFileForWriting, writeStreamToDisk } from '../stream/file-system-access.js';
+import { compressParallel, validateZstdLevel } from '../crypto/compression/zstd.js';
+import type { CompressionFormat } from '../crypto/compression/multi-format.js';
+import { encryptChunksParallel } from '../crypto/encryption/xchacha20.js';
+import { getWorkerCount } from '../stream/adaptive-chunk.js';
+import { openFileForWriting } from '../stream/file-system-access.js';
 import { encodeChunk, GHOST_MAGIC, GHOST_MAGIC_END, GHOST_VERSION, SALT_BYTES, MIN_PASSWORD_LENGTH } from './ghost.js';
 import { generateSalt, deriveKeyArgon2id, deriveSubKeys } from '../crypto/kdf/argon2id.js';
 import type { ChunkInfo } from '../types/index.js';
-import { EncryptionError, ValidationError, OperationCancelledError } from '../errors.js';
+import { ValidationError, OperationCancelledError } from '../errors.js';
 
 /**
  * Format file size for human-readable output
@@ -134,8 +129,7 @@ export async function packToGhostV5(
     console.warn(`Large file detected (${formatFileSize(file.size)}), using streaming mode to avoid memory issues`);
   }
 
-  // Get adaptive chunk configuration
-  const chunkConfig = await getAdaptiveChunkConfig();
+  // Worker count for parallel compression/encryption
   const workerCount = getWorkerCount();
 
   report('compressing', 0, 'Compresseren...');
