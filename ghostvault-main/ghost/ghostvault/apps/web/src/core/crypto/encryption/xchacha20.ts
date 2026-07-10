@@ -5,13 +5,16 @@
  * - XChaCha20-Poly1305 encryptie/decryptie
  * - Parallel chunk encryptie/decryptie
  * - Positie-gebonden AAD per chunk (voorkomt herordening)
- * - Optionele HMAC-SHA256 als extra authenticatielaag
+ * - Optionele HMAC-SHA256 als extra authenticatielaag (standaard uit)
  *
  * BELANGRIJK: de AEAD-AAD moet aan beide kanten identiek en
  * reconstrueerbaar zijn. Daarom binden we ALLEEN de stabiele per-chunk tag
  * (bv. "GhostVault/v5/chunk/<index>") aan de Poly1305-tag - geen vluchtige
  * metadata zoals timestamp of plaintext-checksum, die de decrypter niet kan
  * reproduceren.
+ *
+ * XChaCha20-Poly1305 is een AEAD en authenticeert elke chunk al. De losse
+ * HMAC-laag is optioneel en standaard uitgeschakeld (werd nooit opgeslagen).
  *
  * Gebruikt door:
  * - core/format/packer.ts
@@ -150,14 +153,14 @@ async function verifyHMAC(key: Uint8Array, data: Uint8Array, expectedHMAC: Uint8
  *
  * De AEAD-AAD is exact de meegegeven `aad` (bv. de per-chunk positie-tag),
  * zodat de decrypter dezelfde AAD kan reconstrueren. Er wordt GEEN vluchtige
- * metadata aan de tag gebonden.
+ * metadata aan de tag gebonden. HMAC is optioneel (standaard uit).
  */
 export async function encryptXChaCha20(
   key: Uint8Array,
   plaintext: Uint8Array,
   aad?: Uint8Array,
   nonce?: Uint8Array,
-  enableHMAC: boolean = true
+  enableHMAC: boolean = false
 ): Promise<XChaChaResult> {
   if (key.length !== XCHACHA20_KEY_BYTES) {
     throw new Error('XChaCha20 key must be 32 bytes');
@@ -190,7 +193,7 @@ export async function encryptXChaCha20(
  * Decrypt data met XChaCha20-Poly1305.
  *
  * Gebruikt exact dezelfde `aad` als bij encryptie (symmetrisch), plus
- * optionele HMAC-verificatie.
+ * optionele HMAC-verificatie wanneer een HMAC is meegegeven.
  */
 export async function decryptXChaCha20(
   key: Uint8Array,
@@ -223,6 +226,9 @@ export async function decryptXChaCha20(
  * Elke chunk krijgt een positie-gebonden AAD (`<aadPrefix>/<index>`) zodat
  * de volgorde is geauthenticeerd. Alle chunks worden verwerkt; het geheugen
  * wordt begrensd door batch-gewijze verwerking (geen kunstmatige cap).
+ *
+ * HMAC staat standaard uit: XChaCha20-Poly1305 authenticeert al, en de
+ * HMAC werd nooit in het formaat opgeslagen.
  */
 export async function encryptChunksParallel(
   key: Uint8Array,
@@ -230,7 +236,7 @@ export async function encryptChunksParallel(
   aadPrefix?: string,
   _fileName?: string,
   _timestamp?: number,
-  enableHMAC: boolean = true
+  enableHMAC: boolean = false
 ): Promise<XChaChaResult[]> {
   const BATCH_SIZE = 100;
   const results: XChaChaResult[] = [];
