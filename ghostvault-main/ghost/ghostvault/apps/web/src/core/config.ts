@@ -367,9 +367,48 @@ export function validateConfig(config: any): { valid: boolean; errors: string[] 
 }
 
 /**
+ * Pas environment-variabelen toe die de installer / start.bat zet.
+ * Dit zorgt dat het log-pad en de versie altijd overeenkomen met de
+ * daadwerkelijke installatie, ongeacht waar GhostVault staat. Zonder deze
+ * overrides gebruikt de app het hardgecodeerde DEFAULT_CONFIG-pad, dat op
+ * de meeste machines niet bestaat.
+ */
+function applyEnvOverrides(cfg: AppConfig): AppConfig {
+  const env = (globalThis as any).process?.env;
+  if (!env) return cfg;
+
+  const appLogsDir: string | undefined = env.APP_LOGS_DIR;
+  const ghostLogsDir: string | undefined = env.GHOST_LOGS_DIR;
+  const appVersion: string | undefined = env.APP_VERSION;
+
+  // Clone the sections we touch so we never mutate DEFAULT_CONFIG.
+  const next: AppConfig = {
+    ...cfg,
+    logging: { ...cfg.logging },
+    paths: { ...cfg.paths },
+  };
+
+  if (appLogsDir && appLogsDir.trim().length > 0) {
+    next.logging.logDirectory = appLogsDir;
+    next.paths.appLogsDir = appLogsDir;
+  }
+
+  if (ghostLogsDir && ghostLogsDir.trim().length > 0) {
+    next.paths.logsDir = ghostLogsDir;
+  }
+
+  if (appVersion && appVersion.trim().length > 0) {
+    next.version = appVersion;
+  }
+
+  return next;
+}
+
+/**
  * Load configuration from config.json file
  * Falls back to default configuration if file not found or invalid
  * Supports environment-specific overrides (config.dev.json, config.prod.json)
+ * and APP_LOGS_DIR / GHOST_LOGS_DIR / APP_VERSION env vars set by the installer.
  */
 export async function loadConfig(): Promise<AppConfig> {
   if (config) {
@@ -425,22 +464,23 @@ export async function loadConfig(): Promise<AppConfig> {
           const validation = validateConfig(baseConfig);
           if (!validation.valid) {
             console.error(`[Config] Configuration validation failed:`, validation.errors);
-            configValue = DEFAULT_CONFIG;
-            return configValue;
+            config = applyEnvOverrides(DEFAULT_CONFIG);
+            return config;
           }
 
-          configValue = { ...DEFAULT_CONFIG, ...baseConfig };
-          return configValue;
+          config = applyEnvOverrides({ ...DEFAULT_CONFIG, ...baseConfig });
+          return config;
         }
       }
     }
 
-    configValue = DEFAULT_CONFIG;
-    return configValue;
+    // Fallback to default config, still honoring env overrides.
+    config = applyEnvOverrides(DEFAULT_CONFIG);
+    return config;
   } catch (error) {
     console.error('[Config] Error loading configuration:', error);
-    configValue = DEFAULT_CONFIG;
-    return configValue;
+    config = applyEnvOverrides(DEFAULT_CONFIG);
+    return config;
   }
 }
 
