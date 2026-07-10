@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+*.log
+logs/
+
+# GhostVault runtime temp/data dirs
+ghostvault_temp/
+**/ghostvault_temp/
+*.ghost
+*.ghostkey
+*.ghosttrusted*
+
+# Editor / IDE state
+.vs/
+.vscode/
+.idea/
+*.swp
+*.suo
+*.user
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+.env.*.local
