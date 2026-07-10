@@ -1,81 +1,82 @@
-const CACHE_NAME = 'ghostvault-v2';
 const STATIC_CACHE = 'ghostvault-static-v2';
 const DYNAMIC_CACHE = 'ghostvault-dynamic-v2';
 
-const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-];
+// Only assets we are confident exist. Anything missing is tolerated below.
+const STATIC_ASSETS = ['/', '/index.html'];
 
-// Install event - cache static assets
+// Install - cache static assets individually so one 404 does not abort install.
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(STATIC_CACHE).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    })
+    (async () => {
+      const cache = await caches.open(STATIC_CACHE);
+      await Promise.all(
+        STATIC_ASSETS.map((asset) =>
+          cache.add(asset).catch((err) => {
+            console.warn('[sw] skip caching', asset, err);
+          })
+        )
+      );
+      await self.skipWaiting();
+    })()
   );
 });
 
-// Activate event - clean up old caches
+// Activate - drop old caches and take control of open clients immediately.
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames
-          .filter((cacheName) => {
-            return (
-              cacheName !== STATIC_CACHE &&
-              cacheName !== DYNAMIC_CACHE
-            );
-          })
-          .map((cacheName) => {
-            return caches.delete(cacheName);
-          })
+    (async () => {
+      const names = await caches.keys();
+      await Promise.all(
+        names
+          .filter((n) => n !== STATIC_CACHE && n !== DYNAMIC_CACHE)
+          .map((n) => caches.delete(n))
       );
-    })
+      await self.clients.claim();
+    })()
   );
 });
 
-// Fetch event - serve from cache, fallback to network
+// Paths that must never be served from cache (Vite dev server / HMR / source).
+function isDevOrModuleRequest(url) {
+  if (url.search.includes('t=') || url.search.includes('import')) return true;
+  return (
+    url.pathname.startsWith('/@vite') ||
+    url.pathname.startsWith('/@id') ||
+    url.pathname.startsWith('/@react') ||
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/node_modules/') ||
+    url.pathname.startsWith('/api')
+  );
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Skip non-GET requests
-  if (request.method !== 'GET') {
+  // Only handle same-origin GET requests.
+  if (request.method !== 'GET') return;
+  if (url.origin !== self.location.origin) return;
+  if (url.protocol === 'ws:' || url.protocol === 'wss:') return;
+  if (isDevOrModuleRequest(url)) return; // let the dev server handle it
+
+  // Navigations: network-first so users get fresh HTML, fall back to cache offline.
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request).catch(() => caches.match('/index.html').then((r) => r || caches.match('/')))
+    );
     return;
   }
 
-  // Skip external requests
-  if (!url.origin.startsWith(self.location.origin)) {
-    return;
-  }
-
-  // Skip API requests and WebSocket
-  if (url.pathname.startsWith('/api') || url.protocol === 'ws:') {
-    return;
-  }
-
+  // Other static GETs: cache-first, then network (and cache the result).
   event.respondWith(
-    caches.match(request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-
+    caches.match(request).then((cached) => {
+      if (cached) return cached;
       return fetch(request).then((response) => {
-        // Don't cache non-successful responses
         if (!response || response.status !== 200 || response.type !== 'basic') {
           return response;
         }
-
-        // Clone the response since it can only be consumed once
-        const responseToCache = response.clone();
-
-        caches.open(DYNAMIC_CACHE).then((cache) => {
-          cache.put(request, responseToCache);
-        });
-
+        const copy = response.clone();
+        caches.open(DYNAMIC_CACHE).then((cache) => cache.put(request, copy));
         return response;
       });
     })
