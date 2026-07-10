@@ -66,9 +66,7 @@ class BufferPool {
       return buffers.pop()!;
     }
 
-    // Check if acquiring this buffer would exceed memory limit
     if (this.currentTotalMemory + roundedSize > this.maxTotalMemory) {
-      // Clear pool and create new buffer
       this.clear();
     }
 
@@ -83,12 +81,10 @@ class BufferPool {
     const buffers = this.pool.get(roundedSize) || [];
 
     if (buffers.length < this.maxSize) {
-      // Zero out buffer voor security
       buffer.fill(0);
       buffers.push(buffer);
       this.pool.set(roundedSize, buffers);
     } else {
-      // Buffer not returned to pool, decrease memory tracking
       this.currentTotalMemory -= size;
     }
   }
@@ -99,8 +95,6 @@ class BufferPool {
     if (!Number.isFinite(size) || size <= 0) {
       return 1;
     }
-    // Round up to nearest power of 2 for better reuse.
-    // Cap at 256MB to prevent excessive memory usage.
     const maxSize = 256 * 1024 * 1024;
     const rounded = Math.pow(2, Math.ceil(Math.log2(size)));
     return Math.min(rounded, maxSize);
@@ -112,145 +106,93 @@ class BufferPool {
   }
 }
 
-// Global buffer pool instance
 const bufferPool = new BufferPool();
 
-/**
- * Clear buffer pool (for cleanup or memory pressure)
- */
 export function clearBufferPool(): void {
   bufferPool.clear();
 }
 
 /**
  * Detect bestandstype voor adaptive compressie
- * Optimized: Early return for small data, reduced header checks
  */
 export function detectFileType(data: Uint8Array): string {
-  // Validate input
-  if (!data || data.length === 0) {
-    return 'unknown';
-  }
-
-  // Early return for small data
-  if (data.length < 8) {
-    return 'unknown';
-  }
+  if (!data || data.length === 0) return 'unknown';
+  if (data.length < 8) return 'unknown';
 
   const header = data.subarray(0, 8);
 
-  // PNG: 89 50 4E 47
-  if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47) {
-    return 'image';
-  }
+  // PNG
+  if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47) return 'image';
+  // JPEG
+  if (header[0] === 0xFF && header[1] === 0xD8 && header[2] === 0xFF) return 'image';
+  // GIF
+  if (header[0] === 0x47 && header[1] === 0x49 && header[2] === 0x46) return 'image';
+  // WebP / RIFF
+  if (header[0] === 0x52 && header[1] === 0x49 && header[2] === 0x46 && header[3] === 0x46) return 'image';
 
-  // JPEG: FF D8 FF
-  if (header[0] === 0xFF && header[1] === 0xD8 && header[2] === 0xFF) {
-    return 'image';
-  }
-
-  // GIF: 47 49 46
-  if (header[0] === 0x47 && header[1] === 0x49 && header[2] === 0x46) {
-    return 'image';
-  }
-
-  // WebP: 52 49 46 46
-  if (header[0] === 0x52 && header[1] === 0x49 && header[2] === 0x46 && header[3] === 0x46) {
-    return 'image';
-  }
-
-  // Check voor video signatures
   if (data.length >= 12) {
-    const videoHeader = data.subarray(0, 12);
-
+    const v = data.subarray(0, 12);
     // MP4
-    if (videoHeader[4] === 0x66 && videoHeader[5] === 0x74 && videoHeader[6] === 0x79 && videoHeader[7] === 0x70) {
-      return 'video';
-    }
-
-    // AVI
-    if (videoHeader[0] === 0x52 && videoHeader[1] === 0x49 && videoHeader[2] === 0x46 && videoHeader[3] === 0x46) {
-      return 'video';
-    }
-  }
-
-  // Check voor audio signatures
-  if (data.length >= 12) {
-    const audioHeader = data.subarray(0, 12);
-
+    if (v[4] === 0x66 && v[5] === 0x74 && v[6] === 0x79 && v[7] === 0x70) return 'video';
+    // AVI / RIFF
+    if (v[0] === 0x52 && v[1] === 0x49 && v[2] === 0x46 && v[3] === 0x46) return 'video';
     // MP3
-    if (audioHeader[0] === 0xFF && (audioHeader[1]! & 0xE0) === 0xE0) {
-      return 'audio';
-    }
-
-    // WAV
-    if (audioHeader[0] === 0x52 && audioHeader[1] === 0x49 && audioHeader[2] === 0x46 && audioHeader[3] === 0x46) {
-      return 'audio';
-    }
+    if (v[0] === 0xFF && (v[1]! & 0xE0) === 0xE0) return 'audio';
   }
 
-  // Check voor already compressed formats
   if (data.length >= 4) {
-    const compressedHeader = data.subarray(0, 4);
-
+    const c = data.subarray(0, 4);
     // ZIP
-    if (compressedHeader[0] === 0x50 && compressedHeader[1] === 0x4B && (compressedHeader[2] === 0x03 || compressedHeader[2] === 0x05 || compressedHeader[2] === 0x07)) {
-      return 'compressed';
-    }
-
+    if (c[0] === 0x50 && c[1] === 0x4B && (c[2] === 0x03 || c[2] === 0x05 || c[2] === 0x07)) return 'compressed';
     // GZIP
-    if (compressedHeader[0] === 0x1F && compressedHeader[1] === 0x8B) {
-      return 'compressed';
-    }
-
+    if (c[0] === 0x1F && c[1] === 0x8B) return 'compressed';
     // 7Z
-    if (compressedHeader[0] === 0x37 && compressedHeader[1] === 0x7A && compressedHeader[2] === 0xBC && compressedHeader[3] === 0xAF) {
-      return 'compressed';
-    }
+    if (c[0] === 0x37 && c[1] === 0x7A && c[2] === 0xBC && c[3] === 0xAF) return 'compressed';
   }
 
-  // Default: text/unknown
   return 'text';
 }
 
 /**
- * Adaptive level selection op basis van bestandstype en grootte
+ * Adaptive level selection op basis van bestandstype en grootte.
+ * Hogere levels voor goed comprimeerbare data, laag/uit voor media en
+ * reeds gecomprimeerde content.
  */
 export function getAdaptiveLevel(data: Uint8Array, userLevel: number): number {
   const fileType = detectFileType(data);
   const size = data.length;
 
-  if (fileType === 'image') return Math.min(userLevel, 3);
-  if (fileType === 'video') return Math.min(userLevel, 3);
-  if (fileType === 'audio') return Math.min(userLevel, 3);
+  // Reeds gecomprimeerd: niet nogmaals comprimeren.
   if (fileType === 'compressed') return 0;
+  // Media is al gecomprimeerd: laag houden.
+  if (fileType === 'image' || fileType === 'video' || fileType === 'audio') {
+    return Math.min(userLevel, 3);
+  }
 
-  if (fileType === 'text') {
-    if (size > 10 * 1024 * 1024) return Math.min(userLevel, 12);
-    if (size > 1 * 1024 * 1024) return Math.min(userLevel, 9);
-    return Math.min(userLevel, 6);
+  // Tekst/onbekend: schaal het level met de grootte voor betere ratio.
+  if (fileType === 'text' || fileType === 'unknown') {
+    if (size > 10 * 1024 * 1024) return Math.min(userLevel, 19);
+    if (size > 1 * 1024 * 1024) return Math.min(userLevel, 15);
+    return Math.min(userLevel, 9);
   }
 
   return userLevel;
 }
 
 /**
- * Compress data met Zstd. Output is ALTIJD voorzien van een 1-byte marker,
- * zodat decompressZstd deterministisch weet of het zstd moet decoderen.
+ * Compress data met Zstd. Output is ALTIJD voorzien van een 1-byte marker.
  */
 export async function compressZstd(
   data: Uint8Array,
   level: number,
   useAdaptive: boolean = true
 ): Promise<Uint8Array> {
-  // Very small data: store raw (with marker), skip zstd overhead.
   if (data.length < MIN_COMPRESS_SIZE) {
     return withMarker(MARKER_STORED, data);
   }
 
   const actualLevel = useAdaptive ? getAdaptiveLevel(data, level) : level;
 
-  // Level 0 means "do not compress" (already-compressed content).
   if (actualLevel === 0) {
     return withMarker(MARKER_STORED, data);
   }
@@ -258,8 +200,6 @@ export async function compressZstd(
   const codec = await getCodec();
   const compressed = codec.ZstdSimple.compress(data, actualLevel);
 
-  // Only keep compression if it actually reduces size (accounting for the
-  // 1-byte marker on both branches, which cancels out).
   if (compressed.length >= data.length) {
     return withMarker(MARKER_STORED, data);
   }
@@ -268,8 +208,7 @@ export async function compressZstd(
 }
 
 /**
- * Decompress data die door compressZstd is geproduceerd. Leest de marker en
- * decodeert alleen wanneer nodig. Nooit meer size-gebaseerd raden.
+ * Decompress data die door compressZstd is geproduceerd. Leest de marker.
  */
 export async function decompressZstd(
   data: Uint8Array,
@@ -283,7 +222,7 @@ export async function decompressZstd(
   const payload = data.subarray(1);
 
   if (marker === MARKER_STORED) {
-    return payload.slice(); // copy out of the subarray view
+    return payload.slice();
   }
 
   if (marker !== MARKER_ZSTD) {
