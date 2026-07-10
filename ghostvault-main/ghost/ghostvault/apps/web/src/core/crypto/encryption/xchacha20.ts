@@ -26,25 +26,43 @@ export const XCHACHA20_NONCE_BYTES = 24;
 export const XCHACHA20_TAG_BYTES = 16;
 export const HMAC_SHA256_BYTES = 32;
 
+// Precomputed hex lookup table (0x00-0xff -> '00'-'ff') for fast, allocation-
+// light byte->hex conversion on the per-chunk hot path.
+const HEX_TABLE: string[] = (() => {
+  const t = new Array<string>(256);
+  for (let i = 0; i < 256; i++) t[i] = i.toString(16).padStart(2, '0');
+  return t;
+})();
+
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += HEX_TABLE[bytes[i]!];
+  }
+  return hex;
+}
+
+// Single shared encoder/decoder (avoids per-call allocation).
+const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder();
+
 // Track used nonces for reuse detection
 const usedNonces = new Set<string>();
 const MAX_NONCE_TRACKING = 10000; // Limit tracking to prevent memory issues
 
 /**
- * Check if nonce has been used before (security measure)
- * Optimized: Use hex string conversion without intermediate array
+ * Check if nonce has been used before (security measure).
+ * Records the nonce only when it is new; clearing the set to stay under the
+ * memory cap keeps the just-seen nonce so detection stays consistent.
  */
 export function checkNonceReuse(nonce: Uint8Array): boolean {
-  let nonceHex = '';
-  for (let i = 0; i < nonce.length; i++) {
-    nonceHex += nonce[i]!.toString(16).padStart(2, '0');
-  }
+  const nonceHex = bytesToHex(nonce);
 
   if (usedNonces.has(nonceHex)) {
     return true; // Nonce reuse detected
   }
 
-  // Prevent unbounded memory growth
+  // Prevent unbounded memory growth.
   if (usedNonces.size >= MAX_NONCE_TRACKING) {
     usedNonces.clear();
   }
@@ -96,14 +114,14 @@ function encodeAAD(metadata: AADMetadata): Uint8Array {
     parts.push(`cs:${metadata.checksum}`);
   }
 
-  return new TextEncoder().encode(parts.join('|'));
+  return TEXT_ENCODER.encode(parts.join('|'));
 }
 
 /**
  * Decode AAD metadata van bytes
  */
 function decodeAAD(aad: Uint8Array): AADMetadata {
-  const text = new TextDecoder().decode(aad);
+  const text = TEXT_DECODER.decode(aad);
   const parts = text.split('|');
   const metadata: AADMetadata = {};
 
@@ -132,18 +150,21 @@ function decodeAAD(aad: Uint8Array): AADMetadata {
 }
 
 /**
- * Calculate checksum van data (verbeterd met SHA-256 voor betere security)
- * Optimized: Direct buffer conversion without intermediate array
+ * Calculate checksum van data (SHA-256, hex-encoded)
  */
 async function calculateChecksum(data: Uint8Array): Promise<string> {
-  // Gebruik SHA-256 in plaats van XOR voor betere security
   const hash = await crypto.subtle.digest('SHA-256', data.buffer as ArrayBuffer);
-  const hashArray = new Uint8Array(hash);
-  let hashHex = '';
-  for (let i = 0; i < hashArray.length; i++) {
-    hashHex += hashArray[i]!.toString(16).padStart(2, '0');
-  }
-  return hashHex;
+  return bytesToHex(new Uint8Array(hash));
+}
+
+/**
+ * Build the buffer that HMAC covers: ciphertext || nonce (single allocation).
+ */
+function hmacInput(ciphertext: Uint8Array, nonce: Uint8Array): Uint8Array {
+  const buf = new Uint8Array(ciphertext.length + nonce.length);
+  buf.set(ciphertext, 0);
+  buf.set(nonce, ciphertext.length);
+  return buf;
 }
 
 /**
@@ -170,7 +191,7 @@ async function calculateHMAC(key: Uint8Array, data: Uint8Array): Promise<Uint8Ar
 }
 
 /**
- * Verify HMAC-SHA256 signature
+ * Verify HMAC-SHA256 signature (constant-time)
  */
 async function verifyHMAC(key: Uint8Array, data: Uint8Array, expectedHMAC: Uint8Array): Promise<boolean> {
   if (!key || key.length === 0) {
@@ -242,10 +263,7 @@ export async function encryptXChaCha20(
   // Calculate HMAC if enabled
   let hmac: Uint8Array | undefined;
   if (enableHMAC) {
-    const dataToHMAC = new Uint8Array(ciphertext.length + useNonce.length);
-    dataToHMAC.set(ciphertext);
-    dataToHMAC.set(useNonce, ciphertext.length);
-    hmac = await calculateHMAC(key, dataToHMAC);
+    hmac = await calculateHMAC(key, hmacInput(ciphertext, useNonce));
   }
 
   if (hmac) {
@@ -274,10 +292,7 @@ export async function decryptXChaCha20(
 
   // Verify HMAC if provided
   if (expectedHMAC) {
-    const dataToHMAC = new Uint8Array(ciphertext.length + nonce.length);
-    dataToHMAC.set(ciphertext);
-    dataToHMAC.set(nonce, ciphertext.length);
-    const hmacValid = await verifyHMAC(key, dataToHMAC, expectedHMAC);
+    const hmacValid = await verifyHMAC(key, hmacInput(ciphertext, nonce), expectedHMAC);
     if (!hmacValid) {
       throw new Error('HMAC verificatie mislukt');
     }
@@ -335,7 +350,7 @@ export async function encryptChunksParallel(
     const batchPromises = batch.map(async (chunk, batchIndex) => {
       const index = batchStart + batchIndex;
       const baseAAD = aadPrefix
-        ? new TextEncoder().encode(`${aadPrefix}/${index}`)
+        ? TEXT_ENCODER.encode(`${aadPrefix}/${index}`)
         : undefined;
 
       const checksum = await calculateChecksum(chunk);
@@ -380,7 +395,7 @@ export async function decryptChunksParallel(
     const batchPromises = batch.map(async (chunk, batchIndex) => {
       const index = batchStart + batchIndex;
       const baseAAD = aadPrefix
-        ? new TextEncoder().encode(`${aadPrefix}/${index}`)
+        ? TEXT_ENCODER.encode(`${aadPrefix}/${index}`)
         : undefined;
 
       const expectedMetadata: AADMetadata = {
