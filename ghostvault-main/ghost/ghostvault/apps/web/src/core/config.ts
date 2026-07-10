@@ -144,7 +144,7 @@ export interface AppConfig {
 }
 
 const DEFAULT_CONFIG: AppConfig = {
-  version: '2.1.0',
+  version: '2.5',
   environment: 'production',
   app: {
     name: 'GhostVault',
@@ -155,7 +155,7 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   logging: {
     enableFileLogging: true,
-    logDirectory: 'C:\\ghostvault-main\\ghostghostvault_temp\\app logs',
+    logDirectory: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\app logs',
     minLevel: 'debug',
     enableConsole: true,
     enableStorage: false,
@@ -180,14 +180,14 @@ const DEFAULT_CONFIG: AppConfig = {
     logRetentionDays: 30
   },
   paths: {
-    tempBase: 'C:\\ghostvault-main\\ghostghostvault_temp',
-    tempDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\temp',
-    logsDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\logs',
-    appLogsDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\app logs',
-    nodeCompileCache: 'C:\\ghostvault-main\\ghostghostvault_temp\\node-compile-cache',
-    dataDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\data',
-    backupDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\backups',
-    cacheDir: 'C:\\ghostvault-main\\ghostghostvault_temp\\cache'
+    tempBase: 'C:\\ghostvault-main\\ghost\\ghostvault_temp',
+    tempDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\temp',
+    logsDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\logs',
+    appLogsDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\app logs',
+    nodeCompileCache: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\node-compile-cache',
+    dataDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\data',
+    backupDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\backups',
+    cacheDir: 'C:\\ghostvault-main\\ghost\\ghostvault_temp\\cache'
   },
   installer: {
     installPath: 'C:\\ghostvault',
@@ -207,7 +207,7 @@ const DEFAULT_CONFIG: AppConfig = {
     chunkSize: 1048576,
     enableStreamingDecrypt: true,
     enableMemoryWipe: true,
-    defaultEncryptionAlgorithm: 'AES-256-GCM',
+    defaultEncryptionAlgorithm: 'XChaCha20-Poly1305',
     defaultCompressionAlgorithm: 'zstd'
   },
   features: {
@@ -223,7 +223,7 @@ const DEFAULT_CONFIG: AppConfig = {
     enableFileIntegrityCheck: true
   },
   security: {
-    minPasswordLength: 8,
+    minPasswordLength: 6,
     maxPasswordLength: 128,
     requireSpecialChars: false,
     requireNumbers: false,
@@ -296,17 +296,14 @@ let config: AppConfig | null = null;
 export function validateConfig(config: any): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
-  // Validate version
   if (!config.version || typeof config.version !== 'string') {
     errors.push('Invalid or missing version');
   }
 
-  // Validate environment
   if (config.environment && !['production', 'development', 'test'].includes(config.environment)) {
     errors.push('Invalid environment (must be "production", "development", or "test")');
   }
 
-  // Validate app section
   if (!config.app || typeof config.app !== 'object') {
     errors.push('Invalid or missing app section');
   } else {
@@ -315,7 +312,6 @@ export function validateConfig(config: any): { valid: boolean; errors: string[] 
     }
   }
 
-  // Validate logging section
   if (!config.logging || typeof config.logging !== 'object') {
     errors.push('Invalid or missing logging section');
   } else {
@@ -333,12 +329,10 @@ export function validateConfig(config: any): { valid: boolean; errors: string[] 
     }
   }
 
-  // Validate paths section
   if (!config.paths || typeof config.paths !== 'object') {
     errors.push('Invalid or missing paths section');
   }
 
-  // Validate security section
   if (config.security && typeof config.security === 'object') {
     if (config.security.minPasswordLength && (typeof config.security.minPasswordLength !== 'number' || config.security.minPasswordLength < 1)) {
       errors.push('Invalid security.minPasswordLength');
@@ -348,21 +342,18 @@ export function validateConfig(config: any): { valid: boolean; errors: string[] 
     }
   }
 
-  // Validate performance section
   if (config.performance && typeof config.performance === 'object') {
     if (config.performance.maxConcurrentOperations && (typeof config.performance.maxConcurrentOperations !== 'number' || config.performance.maxConcurrentOperations < 1)) {
       errors.push('Invalid performance.maxConcurrentOperations');
     }
   }
 
-  // Validate ui section
   if (config.ui && typeof config.ui === 'object') {
     if (config.ui.theme && !['dark', 'light', 'auto'].includes(config.ui.theme)) {
       errors.push('Invalid ui.theme (must be "dark", "light", or "auto")');
     }
   }
 
-  // Validate debug section
   if (config.debug && typeof config.debug === 'object') {
     if (config.debug.debugPort && (typeof config.debug.debugPort !== 'number' || config.debug.debugPort < 1 || config.debug.debugPort > 65535)) {
       errors.push('Invalid debug.debugPort (must be between 1 and 65535)');
@@ -376,9 +367,48 @@ export function validateConfig(config: any): { valid: boolean; errors: string[] 
 }
 
 /**
+ * Pas environment-variabelen toe die de installer / start.bat zet.
+ * Dit zorgt dat het log-pad en de versie altijd overeenkomen met de
+ * daadwerkelijke installatie, ongeacht waar GhostVault staat. Zonder deze
+ * overrides gebruikt de app het hardgecodeerde DEFAULT_CONFIG-pad, dat op
+ * de meeste machines niet bestaat.
+ */
+function applyEnvOverrides(cfg: AppConfig): AppConfig {
+  const env = (globalThis as any).process?.env;
+  if (!env) return cfg;
+
+  const appLogsDir: string | undefined = env.APP_LOGS_DIR;
+  const ghostLogsDir: string | undefined = env.GHOST_LOGS_DIR;
+  const appVersion: string | undefined = env.APP_VERSION;
+
+  // Clone the sections we touch so we never mutate DEFAULT_CONFIG.
+  const next: AppConfig = {
+    ...cfg,
+    logging: { ...cfg.logging },
+    paths: { ...cfg.paths },
+  };
+
+  if (appLogsDir && appLogsDir.trim().length > 0) {
+    next.logging.logDirectory = appLogsDir;
+    next.paths.appLogsDir = appLogsDir;
+  }
+
+  if (ghostLogsDir && ghostLogsDir.trim().length > 0) {
+    next.paths.logsDir = ghostLogsDir;
+  }
+
+  if (appVersion && appVersion.trim().length > 0) {
+    next.version = appVersion;
+  }
+
+  return next;
+}
+
+/**
  * Load configuration from config.json file
  * Falls back to default configuration if file not found or invalid
  * Supports environment-specific overrides (config.dev.json, config.prod.json)
+ * and APP_LOGS_DIR / GHOST_LOGS_DIR / APP_VERSION env vars set by the installer.
  */
 export async function loadConfig(): Promise<AppConfig> {
   if (config) {
@@ -388,21 +418,15 @@ export async function loadConfig(): Promise<AppConfig> {
   let configValue: AppConfig = DEFAULT_CONFIG;
 
   try {
-    // Check if running in Node.js environment
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const isNode = typeof (globalThis as any).process !== 'undefined' && (globalThis as any).process?.versions?.node;
 
     if (isNode) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fs = (globalThis as any).require?.('fs') || (globalThis as any).require?.('node:fs');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const path = (globalThis as any).require?.('path') || (globalThis as any).require?.('node:path');
 
       if (fs && path) {
-        // Determine environment from NODE_ENV or default to production
         const nodeEnv = (process as any).env?.NODE_ENV || 'production';
 
-        // Try to find config.json in various locations
         const possiblePaths = [
           path.join(process.cwd(), 'config.json'),
           path.join(process.cwd(), '..', 'config.json'),
@@ -412,7 +436,6 @@ export async function loadConfig(): Promise<AppConfig> {
         let baseConfig: any = null;
         let loadedFrom: string | null = null;
 
-        // Load base config
         for (const configPath of possiblePaths) {
           if (fs.existsSync(configPath)) {
             try {
@@ -426,7 +449,6 @@ export async function loadConfig(): Promise<AppConfig> {
           }
         }
 
-        // Load environment-specific override if exists
         const envConfigPath = loadedFrom ? loadedFrom.replace('config.json', `config.${nodeEnv}.json`) : null;
         if (envConfigPath && fs.existsSync(envConfigPath)) {
           try {
@@ -438,28 +460,27 @@ export async function loadConfig(): Promise<AppConfig> {
           }
         }
 
-        // Validate configuration
         if (baseConfig) {
           const validation = validateConfig(baseConfig);
           if (!validation.valid) {
             console.error(`[Config] Configuration validation failed:`, validation.errors);
-            configValue = DEFAULT_CONFIG;
-            return configValue;
+            config = applyEnvOverrides(DEFAULT_CONFIG);
+            return config;
           }
 
-          configValue = { ...DEFAULT_CONFIG, ...baseConfig };
-          return configValue;
+          config = applyEnvOverrides({ ...DEFAULT_CONFIG, ...baseConfig });
+          return config;
         }
       }
     }
 
-    // Fallback to default config
-    configValue = DEFAULT_CONFIG;
-    return configValue;
+    // Fallback to default config, still honoring env overrides.
+    config = applyEnvOverrides(DEFAULT_CONFIG);
+    return config;
   } catch (error) {
     console.error('[Config] Error loading configuration:', error);
-    configValue = DEFAULT_CONFIG;
-    return configValue;
+    config = applyEnvOverrides(DEFAULT_CONFIG);
+    return config;
   }
 }
 

@@ -2,19 +2,19 @@
  * MODULE: .ghost Format v5
  *
  * Verantwoordelijkheid:
- *  - .ghost format v5 implementatie
- *  - Streaming header parsing
- *  - Streaming chunk parsing
- *  - Backward compatibility (v1-v4)
+ * - .ghost format v5 implementatie
+ * - Streaming header parsing
+ * - Streaming chunk parsing
+ * - Backward compatibility (v1-v4)
  *
  * Gebruikt door:
- *  - core/format/packer.ts
- *  - core/format/unpacker.ts
+ * - core/format/packer.ts
+ * - core/format/unpacker.ts
  *
  * Afhankelijk van:
- *  - core/crypto/encryption/xchacha20.ts
- *  - core/crypto/kdf/argon2id.ts
- *  - core/types/index.ts
+ * - core/crypto/encryption/xchacha20.ts
+ * - core/crypto/kdf/argon2id.ts
+ * - core/types/index.ts
  *
  * @module core/format/ghost
  */
@@ -30,7 +30,16 @@ export const XCHACHA20_NONCE_BYTES = 24;
 export const XCHACHA20_TAG_BYTES = 16;
 export const SHA256_BYTES = 32;
 
+/**
+ * Minimum password length. Single source of truth shared by packer and
+ * unpacker so the pack/unpack policy can never drift out of sync.
+ */
+export const MIN_PASSWORD_LENGTH = 6;
+
 export const GHOST_V5_CHUNK_PREFIX = 8 + XCHACHA20_NONCE_BYTES + 4; // chunkId + nonce + cipherLen
+
+/** Size of the fixed .ghost header: magic(5) + version(1) + salt + opaqueLen(4) */
+export const GHOST_HEADER_BYTES = 5 + 1 + SALT_BYTES + 4;
 
 export interface GhostHeader {
   magic: Uint8Array;
@@ -61,7 +70,7 @@ export function parseHeader(buffer: Uint8Array): GhostHeader {
     throw new Error('Invalid header: buffer is empty');
   }
 
-  if (buffer.length < 5 + 1 + 32 + 4) {
+  if (buffer.length < GHOST_HEADER_BYTES) {
     throw new Error('File too short for header');
   }
 
@@ -98,7 +107,7 @@ export function parseFooter(buffer: Uint8Array): GhostFooter {
     throw new Error('Invalid footer position: file too short for footer');
   }
 
-  const magicEnd = buffer.subarray(footerStart);
+  const magicEnd = buffer.subarray(footerStart, footerStart + GHOST_MAGIC_END.length);
   if (!bytesEqual(magicEnd, GHOST_MAGIC_END)) {
     throw new Error('Invalid .ghost footer magic');
   }
@@ -106,7 +115,10 @@ export function parseFooter(buffer: Uint8Array): GhostFooter {
   const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   const totalChunks = view.getBigUint64(footerStart + GHOST_MAGIC_END.length, false);
   const totalSize = view.getBigUint64(footerStart + GHOST_MAGIC_END.length + 8, false);
-  const fileHash = buffer.subarray(footerStart + GHOST_MAGIC_END.length + 16);
+  const fileHash = buffer.subarray(
+    footerStart + GHOST_MAGIC_END.length + 16,
+    footerStart + GHOST_MAGIC_END.length + 16 + SHA256_BYTES
+  );
 
   return {
     magicEnd,

@@ -2,22 +2,28 @@
  * MODULE: Zstandard Streaming Compression
  *
  * Verantwoordelijkheid:
- *  - Zstd compressie/decompressie met streaming
- *  - Multi-threaded compressie
- *  - Adaptive level selection
- *  - Small payload handling
+ * - Zstd compressie/decompressie met streaming
+ * - Multi-threaded compressie
+ * - Adaptive level selection
+ * - Small payload handling
+ *
+ * Elke chunk krijgt een 1-byte header zodat decompressie deterministisch
+ * is en nooit hoeft te raden of een chunk gecomprimeerd is:
+ *   0x00 = STORED (rauw, niet gecomprimeerd)
+ *   0x01 = ZSTD   (zstd-gecomprimeerd)
  *
  * Gebruikt door:
- *  - core/format/packer.ts
- *  - core/format/unpacker.ts
+ * - core/format/packer.ts
+ * - core/format/unpacker.ts
  *
  * Afhankelijk van:
- *  - @oneidentity/zstd-js
+ * - @oneidentity/zstd-js
  *
  * @module core/crypto/compression/zstd
  */
 
 import { ZstdInit, type ZstdCodec } from '@oneidentity/zstd-js';
+import { CompressionError } from '../../errors.js';
 
 let codecPromise: Promise<ZstdCodec> | null = null;
 
@@ -29,6 +35,18 @@ function getCodec(): Promise<ZstdCodec> {
 }
 
 const MIN_COMPRESS_SIZE = 100;
+
+// 1-byte chunk markers (see module header)
+const MARKER_STORED = 0x00;
+const MARKER_ZSTD = 0x01;
+
+/** Prefix `payload` with a single marker byte. */
+function withMarker(marker: number, payload: Uint8Array): Uint8Array {
+  const out = new Uint8Array(payload.length + 1);
+  out[0] = marker;
+  out.set(payload, 1);
+  return out;
+}
 
 /**
  * Buffer Pool voor hergebruik van buffers
@@ -48,9 +66,7 @@ class BufferPool {
       return buffers.pop()!;
     }
 
-    // Check if acquiring this buffer would exceed memory limit
     if (this.currentTotalMemory + roundedSize > this.maxTotalMemory) {
-      // Clear pool and create new buffer
       this.clear();
     }
 
@@ -65,19 +81,20 @@ class BufferPool {
     const buffers = this.pool.get(roundedSize) || [];
 
     if (buffers.length < this.maxSize) {
-      // Zero out buffer voor security
       buffer.fill(0);
       buffers.push(buffer);
       this.pool.set(roundedSize, buffers);
     } else {
-      // Buffer not returned to pool, decrease memory tracking
       this.currentTotalMemory -= size;
     }
   }
 
   private roundSize(size: number): number {
-    // Round up to nearest power of 2 for better reuse
-    // Cap at 256MB to prevent excessive memory usage
+    // Guard against non-positive sizes: Math.log2(0) is -Infinity which
+    // would produce a zero-length buffer.
+    if (!Number.isFinite(size) || size <= 0) {
+      return 1;
+    }
     const maxSize = 256 * 1024 * 1024;
     const rounded = Math.pow(2, Math.ceil(Math.log2(size)));
     return Math.min(rounded, maxSize);
@@ -89,199 +106,143 @@ class BufferPool {
   }
 }
 
-// Global buffer pool instance
 const bufferPool = new BufferPool();
 
-/**
- * Clear buffer pool (for cleanup or memory pressure)
- */
 export function clearBufferPool(): void {
   bufferPool.clear();
 }
 
 /**
  * Detect bestandstype voor adaptive compressie
- * Optimized: Early return for small data, reduced header checks
  */
 export function detectFileType(data: Uint8Array): string {
-  // Validate input
-  if (!data || data.length === 0) {
-    return 'unknown';
-  }
-
-  // Early return for small data
-  if (data.length < 8) {
-    return 'unknown';
-  }
+  if (!data || data.length === 0) return 'unknown';
+  if (data.length < 8) return 'unknown';
 
   const header = data.subarray(0, 8);
 
-  // Check voor image signatures (optimized with direct byte comparison)
-  // PNG: 89 50 4E 47
-  if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47) {
-    return 'image';
-  }
+  // PNG
+  if (header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47) return 'image';
+  // JPEG
+  if (header[0] === 0xFF && header[1] === 0xD8 && header[2] === 0xFF) return 'image';
+  // GIF
+  if (header[0] === 0x47 && header[1] === 0x49 && header[2] === 0x46) return 'image';
+  // WebP / RIFF
+  if (header[0] === 0x52 && header[1] === 0x49 && header[2] === 0x46 && header[3] === 0x46) return 'image';
 
-  // JPEG: FF D8 FF
-  if (header[0] === 0xFF && header[1] === 0xD8 && header[2] === 0xFF) {
-    return 'image';
-  }
-
-  // GIF: 47 49 46
-  if (header[0] === 0x47 && header[1] === 0x49 && header[2] === 0x46) {
-    return 'image';
-  }
-
-  // WebP: 52 49 46 46
-  if (header[0] === 0x52 && header[1] === 0x49 && header[2] === 0x46 && header[3] === 0x46) {
-    return 'image';
-  }
-
-  // Check voor video signatures
   if (data.length >= 12) {
-    const videoHeader = data.subarray(0, 12);
-
+    const v = data.subarray(0, 12);
     // MP4
-    if (videoHeader[4] === 0x66 && videoHeader[5] === 0x74 && videoHeader[6] === 0x79 && videoHeader[7] === 0x70) {
-      return 'video';
-    }
-
-    // AVI
-    if (videoHeader[0] === 0x52 && videoHeader[1] === 0x49 && videoHeader[2] === 0x46 && videoHeader[3] === 0x46) {
-      return 'video';
-    }
-  }
-
-  // Check voor audio signatures
-  if (data.length >= 12) {
-    const audioHeader = data.subarray(0, 12);
-
+    if (v[4] === 0x66 && v[5] === 0x74 && v[6] === 0x79 && v[7] === 0x70) return 'video';
+    // AVI / RIFF
+    if (v[0] === 0x52 && v[1] === 0x49 && v[2] === 0x46 && v[3] === 0x46) return 'video';
     // MP3
-    if (audioHeader[0] === 0xFF && (audioHeader[1]! & 0xE0) === 0xE0) {
-      return 'audio';
-    }
-
-    // WAV
-    if (audioHeader[0] === 0x52 && audioHeader[1] === 0x49 && audioHeader[2] === 0x46 && audioHeader[3] === 0x46) {
-      return 'audio';
-    }
+    if (v[0] === 0xFF && (v[1]! & 0xE0) === 0xE0) return 'audio';
   }
 
-  // Check voor already compressed formats
   if (data.length >= 4) {
-    const compressedHeader = data.subarray(0, 4);
-
+    const c = data.subarray(0, 4);
     // ZIP
-    if (compressedHeader[0] === 0x50 && compressedHeader[1] === 0x4B && (compressedHeader[2] === 0x03 || compressedHeader[2] === 0x05 || compressedHeader[2] === 0x07)) {
-      return 'compressed';
-    }
-
+    if (c[0] === 0x50 && c[1] === 0x4B && (c[2] === 0x03 || c[2] === 0x05 || c[2] === 0x07)) return 'compressed';
     // GZIP
-    if (compressedHeader[0] === 0x1F && compressedHeader[1] === 0x8B) {
-      return 'compressed';
-    }
-
+    if (c[0] === 0x1F && c[1] === 0x8B) return 'compressed';
     // 7Z
-    if (compressedHeader[0] === 0x37 && compressedHeader[1] === 0x7A && compressedHeader[2] === 0xBC && compressedHeader[3] === 0xAF) {
-      return 'compressed';
-    }
+    if (c[0] === 0x37 && c[1] === 0x7A && c[2] === 0xBC && c[3] === 0xAF) return 'compressed';
   }
 
-  // Default: text/unknown
   return 'text';
 }
 
 /**
- * Adaptive level selection op basis van bestandstype en grootte
+ * Adaptive level selection op basis van bestandstype en grootte.
+ * Hogere levels voor goed comprimeerbare data, laag/uit voor media en
+ * reeds gecomprimeerde content.
  */
 export function getAdaptiveLevel(data: Uint8Array, userLevel: number): number {
   const fileType = detectFileType(data);
   const size = data.length;
-  
-  // Images: laag level (al gecomprimeerd)
-  if (fileType === 'image') {
+
+  // Reeds gecomprimeerd: niet nogmaals comprimeren.
+  if (fileType === 'compressed') return 0;
+  // Media is al gecomprimeerd: laag houden.
+  if (fileType === 'image' || fileType === 'video' || fileType === 'audio') {
     return Math.min(userLevel, 3);
   }
-  
-  // Video: laag level (al gecomprimeerd)
-  if (fileType === 'video') {
-    return Math.min(userLevel, 3);
+
+  // Tekst/onbekend: schaal het level met de grootte voor betere ratio.
+  if (fileType === 'text' || fileType === 'unknown') {
+    if (size > 10 * 1024 * 1024) return Math.min(userLevel, 19);
+    if (size > 1 * 1024 * 1024) return Math.min(userLevel, 15);
+    return Math.min(userLevel, 9);
   }
-  
-  // Audio: laag level (al gecomprimeerd)
-  if (fileType === 'audio') {
-    return Math.min(userLevel, 3);
-  }
-  
-  // Already compressed: skip (level 0)
-  if (fileType === 'compressed') {
-    return 0;
-  }
-  
-  // Text: hoger level voor betere compressie
-  if (fileType === 'text') {
-    // Grotere bestanden kunnen hoger level gebruiken
-    if (size > 10 * 1024 * 1024) { // > 10MB
-      return Math.min(userLevel, 12);
-    }
-    if (size > 1 * 1024 * 1024) { // > 1MB
-      return Math.min(userLevel, 9);
-    }
-    return Math.min(userLevel, 6);
-  }
-  
-  // Default: gebruik user level
+
   return userLevel;
 }
 
 /**
- * Compress data met Zstd (met adaptive level en buffer pooling)
+ * Compress data met Zstd. Output is ALTIJD voorzien van een 1-byte marker.
  */
 export async function compressZstd(
   data: Uint8Array,
   level: number,
   useAdaptive: boolean = true
 ): Promise<Uint8Array> {
-  // Skip compression for very small data
   if (data.length < MIN_COMPRESS_SIZE) {
-    return data;
+    return withMarker(MARKER_STORED, data);
   }
 
-  // Use adaptive level if enabled
   const actualLevel = useAdaptive ? getAdaptiveLevel(data, level) : level;
+
+  if (actualLevel === 0) {
+    return withMarker(MARKER_STORED, data);
+  }
 
   const codec = await getCodec();
   const compressed = codec.ZstdSimple.compress(data, actualLevel);
 
-  // Only use compression if it actually reduces size
   if (compressed.length >= data.length) {
-    return data;
+    return withMarker(MARKER_STORED, data);
   }
 
-  return compressed;
+  return withMarker(MARKER_ZSTD, compressed);
 }
 
 /**
- * Decompress data met Zstd
+ * Decompress data die door compressZstd is geproduceerd. Leest de marker.
  */
 export async function decompressZstd(
   data: Uint8Array,
-  originalSize: number
+  originalSize: number = 0
 ): Promise<Uint8Array> {
-  // Skip decompression for very small data
-  if (data.length < MIN_COMPRESS_SIZE) {
-    return data;
+  if (!data || data.length === 0) {
+    return new Uint8Array(0);
   }
 
-  const codec = await getCodec();
-  const decompressed = codec.ZstdSimple.decompress(data);
+  const marker = data[0];
+  const payload = data.subarray(1);
 
-  // Validate size if originalSize is provided
-  if (originalSize > 0 && decompressed.length !== originalSize) {
-    console.warn('[ZSTD] Decompressed size mismatch - data may be corrupted');
+  if (marker === MARKER_STORED) {
+    return payload.slice();
   }
 
-  return decompressed;
+  if (marker !== MARKER_ZSTD) {
+    throw new CompressionError('Onbekende compressie-marker in chunk', { marker });
+  }
+
+  try {
+    const codec = await getCodec();
+    const decompressed = codec.ZstdSimple.decompress(payload);
+
+    if (originalSize > 0 && decompressed.length !== originalSize) {
+      console.warn('[ZSTD] Decompressed size mismatch - data may be corrupted');
+    }
+
+    return decompressed;
+  } catch (error) {
+    throw new CompressionError('Zstd-decompressie mislukt', {
+      cause: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
@@ -303,7 +264,7 @@ export function createCompressTransform(level: number, useAdaptive: boolean = tr
 /**
  * Streaming decompressie met TransformStream
  */
-export function createDecompressTransform(originalSize: number): TransformStream<Uint8Array, Uint8Array> {
+export function createDecompressTransform(originalSize: number = 0): TransformStream<Uint8Array, Uint8Array> {
   return new TransformStream({
     async transform(chunk, controller) {
       try {
@@ -317,7 +278,8 @@ export function createDecompressTransform(originalSize: number): TransformStream
 }
 
 /**
- * Multi-threaded compressie voor grote bestanden met buffer pooling en memory limits
+ * Multi-threaded compressie voor grote bestanden.
+ * Verwerkt ALLE chunks - concurrency wordt begrensd door workerCount.
  */
 export async function compressParallel(
   chunks: Uint8Array[],
@@ -325,73 +287,52 @@ export async function compressParallel(
   workerCount: number,
   useAdaptive: boolean = true
 ): Promise<Uint8Array[]> {
-  // Optimize worker count based on chunk count
-  const optimalWorkerCount = Math.min(workerCount, chunks.length);
+  if (chunks.length === 0) return [];
 
-  // Limit total chunks to prevent memory issues
-  const MAX_CHUNKS = 10000;
-  const chunksToProcess = chunks.length > MAX_CHUNKS ? chunks.slice(0, MAX_CHUNKS) : chunks;
-
-  if (chunks.length > MAX_CHUNKS) {
-    console.warn(`Extreme chunk count (${chunks.length}), processing only first ${MAX_CHUNKS} chunks`);
-  }
-
-  // Split chunks among workers
-  const chunksPerWorker = Math.ceil(chunksToProcess.length / optimalWorkerCount);
+  const optimalWorkerCount = Math.max(1, Math.min(workerCount, chunks.length));
+  const chunksPerWorker = Math.ceil(chunks.length / optimalWorkerCount);
   const workerBatches: Uint8Array[][] = [];
 
-  for (let i = 0; i < chunksToProcess.length; i += chunksPerWorker) {
-    workerBatches.push(chunksToProcess.slice(i, i + chunksPerWorker));
+  for (let i = 0; i < chunks.length; i += chunksPerWorker) {
+    workerBatches.push(chunks.slice(i, i + chunksPerWorker));
   }
 
-  // Compress each batch in parallel
   const results = await Promise.all(
     workerBatches.map(async (batch) => {
       return Promise.all(batch.map((chunk) => compressZstd(chunk, level, useAdaptive)));
     })
   );
 
-  // Flatten results
   return results.flat();
 }
 
 /**
- * Multi-threaded decompressie voor grote bestanden met buffer pooling en memory limits
+ * Multi-threaded decompressie voor grote bestanden.
+ * Verwerkt ALLE chunks - concurrency wordt begrensd door workerCount.
  */
 export async function decompressParallel(
   chunks: Uint8Array[],
   originalSizes: number[],
   workerCount: number
 ): Promise<Uint8Array[]> {
-  // Optimize worker count based on chunk count
-  const optimalWorkerCount = Math.min(workerCount, chunks.length);
+  if (chunks.length === 0) return [];
 
-  // Limit total chunks to prevent memory issues
-  const MAX_CHUNKS = 10000;
-  const chunksToProcess = chunks.length > MAX_CHUNKS ? chunks.slice(0, MAX_CHUNKS) : chunks;
-
-  if (chunks.length > MAX_CHUNKS) {
-    console.warn(`Extreme chunk count (${chunks.length}), processing only first ${MAX_CHUNKS} chunks`);
-  }
-
-  // Split chunks among workers
-  const chunksPerWorker = Math.ceil(chunksToProcess.length / optimalWorkerCount);
+  const optimalWorkerCount = Math.max(1, Math.min(workerCount, chunks.length));
+  const chunksPerWorker = Math.ceil(chunks.length / optimalWorkerCount);
   const workerBatches: { chunk: Uint8Array; originalSize: number }[][] = [];
 
-  for (let i = 0; i < chunksToProcess.length; i += chunksPerWorker) {
-    const batch = chunksToProcess.slice(i, i + chunksPerWorker);
+  for (let i = 0; i < chunks.length; i += chunksPerWorker) {
+    const batch = chunks.slice(i, i + chunksPerWorker);
     const sizes = originalSizes.slice(i, i + chunksPerWorker);
-    workerBatches.push(batch.map((chunk, idx) => ({ chunk, originalSize: sizes[idx] })));
+    workerBatches.push(batch.map((chunk, idx) => ({ chunk, originalSize: sizes[idx] ?? 0 })));
   }
 
-  // Decompress each batch in parallel
   const results = await Promise.all(
     workerBatches.map(async (batch) => {
       return Promise.all(batch.map(({ chunk, originalSize }) => decompressZstd(chunk, originalSize)));
     })
   );
 
-  // Flatten results
   return results.flat();
 }
 

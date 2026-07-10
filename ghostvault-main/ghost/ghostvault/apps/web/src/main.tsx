@@ -6,49 +6,29 @@ import { getLogger } from './core';
 import { loadConfig } from './core/config';
 import { registerServiceWorker } from './serviceWorkerRegistration';
 
-// Load configuration and configure logger
-async function initializeApp() {
+/**
+ * Load configuration for side effects (logger setup, version surfacing).
+ * File logging is a Node-only concern (no fs in the browser), so we do not
+ * configure it here; config.ts applies the env-aware log path on the Node
+ * side. A failure here must never block rendering.
+ */
+async function initializeApp(): Promise<void> {
   try {
     const config = await loadConfig();
-    
-    // Configure logger with file logging if APP_LOGS_DIR is set
-    const appLogsDir = typeof process !== 'undefined' && (process as any).env?.APP_LOGS_DIR || config.logging.logDirectory;
-    const appVersion = typeof process !== 'undefined' && (process as any).env?.APP_VERSION || config.version;
-
-    if (appLogsDir) {
-      // Configure default logger to use file logging with version-specific subdirectory
-      getLogger('app', {
-        enableFileLogging: config.logging.enableFileLogging,
-        logDirectory: appLogsDir,
-        version: appVersion,
-        enableConsole: config.logging.enableConsole,
-        enableStorage: config.logging.enableStorage,
-        maxFileSize: config.logging.maxFileSize,
-        maxFiles: config.logging.maxFiles,
-        compressOldLogs: config.logging.compressOldLogs,
-        compressAfterDays: config.logging.compressAfterDays
-      });
-      
-      const logger = getLogger('app');
-      logger.info(`Logs komen in: ${appLogsDir}\\ghostvault_${appVersion}`);
-      logger.info(`App versie: ${appVersion}`);
-      logger.info(`Config loaded from config.json`);
-    }
+    const logger = getLogger('app', {
+      enableConsole: config.logging.enableConsole,
+      enableStorage: config.logging.enableStorage,
+    });
+    logger.info(`GhostVault v${config.version} gestart`);
   } catch (error) {
-    console.error('[Config] Failed to load configuration:', error);
-    // Continue with default configuration
+    console.error('[Config] Failed to load configuration, using defaults:', error);
   }
 }
 
-// Initialize app then render
-initializeApp().then(() => {
-  // Register service worker
-  registerServiceWorker();
-
-  // Validate root element exists
+function render(): void {
   const rootElement = document.getElementById('root');
   if (!rootElement) {
-    throw new Error('Root element not found');
+    throw new Error('Root element (#root) not found in index.html');
   }
 
   ReactDOM.createRoot(rootElement).render(
@@ -56,17 +36,9 @@ initializeApp().then(() => {
       <App />
     </React.StrictMode>
   );
-}).catch(error => {
-  console.error('[Init] Failed to initialize app:', error);
-  // Fallback render without config
-  const rootElement = document.getElementById('root');
-  if (!rootElement) {
-    throw new Error('Root element not found');
-  }
+}
 
-  ReactDOM.createRoot(rootElement).render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>
-  );
-});
+// Register the service worker, then render once. Config loading runs but must
+// never gate the UI, so render happens regardless of its outcome.
+registerServiceWorker();
+initializeApp().finally(render);

@@ -2,22 +2,31 @@
  * MODULE: Multi-Format Compression
  *
  * Verantwoordelijkheid:
- *  - Multi-format compressie (Zstd, LZMA2, Brotli)
- *  - Format selectie op basis van bestandstype
- *  - Fallback naar beste format
+ * - Compressie-formaatselectie (Zstd of geen)
+ * - Automatische keuze op basis van bestandstype
+ *
+ * Alleen Zstd wordt daadwerkelijk ondersteund. Eerdere versies deden
+ * alsof Brotli/LZMA2 werden ondersteund, maar die vielen stilletjes
+ * terug op Zstd - dat is verwijderd om misleiding te voorkomen.
  *
  * Gebruikt door:
- *  - core/format/packer.ts
+ * - core/format/packer.ts
  *
  * Afhankelijk van:
- *  - @oneidentity/zstd-js
+ * - core/crypto/compression/zstd.ts
  *
  * @module core/crypto/compression/multi-format
  */
 
 import { compressZstd, decompressZstd, detectFileType } from './zstd.js';
 
-export type CompressionFormat = 'zstd' | 'lzma2' | 'brotli' | 'none' | 'auto';
+/**
+ * Ondersteunde compressie-formaten.
+ * - 'zstd': Zstandard compressie
+ * - 'none': geen compressie (rauw opslaan)
+ * - 'auto': kies automatisch op basis van bestandstype
+ */
+export type CompressionFormat = 'zstd' | 'none' | 'auto';
 
 export interface CompressionOptions {
   format: CompressionFormat;
@@ -35,43 +44,23 @@ export interface CompressionResult {
 }
 
 /**
- * Selecteer beste compressie format op basis van bestandstype
+ * Selecteer het beste compressie-formaat op basis van bestandstype.
+ * Al-gecomprimeerde content wordt niet nogmaals gecomprimeerd.
  */
 export function selectBestFormat(data: Uint8Array): CompressionFormat {
   const fileType = detectFileType(data);
-  const size = data.length;
 
-  // Images: Zstd (snel, redeneerbaar goede compressie)
-  if (fileType === 'image') {
-    return 'zstd';
-  }
-
-  // Video: Zstd (snelste voor grote bestanden)
-  if (fileType === 'video') {
-    return 'zstd';
-  }
-
-  // Audio: Zstd
-  if (fileType === 'audio') {
-    return 'zstd';
-  }
-
-  // Already compressed: none
+  // Reeds gecomprimeerd (zip/gzip/7z): niet nogmaals comprimeren.
   if (fileType === 'compressed') {
     return 'none';
   }
 
-  // Text: Brotli (betere compressie voor tekst)
-  if (fileType === 'text') {
-    return 'brotli';
-  }
-
-  // Default: Zstd
+  // Alles anders: Zstd (het enige echt ondersteunde formaat).
   return 'zstd';
 }
 
 /**
- * Compress met geselecteerd format
+ * Compress met het geselecteerde formaat.
  */
 export async function compressMultiFormat(
   data: Uint8Array,
@@ -80,7 +69,7 @@ export async function compressMultiFormat(
   const originalSize = data.length;
   const startTime = performance.now();
 
-  // Skip compressie voor very small data
+  // Skip compressie voor zeer kleine data
   if (data.length < 100) {
     return {
       data,
@@ -92,10 +81,9 @@ export async function compressMultiFormat(
     };
   }
 
-  // Gebruik geselecteerd format of selecteer automatisch
-  const format = options.format === 'auto' ? selectBestFormat(data) : options.format as CompressionFormat;
+  // Bepaal het formaat (automatisch of expliciet)
+  const format = options.format === 'auto' ? selectBestFormat(data) : options.format;
 
-  // Skip als format 'none' is
   if (format === 'none') {
     return {
       data,
@@ -103,47 +91,30 @@ export async function compressMultiFormat(
       ratio: 1,
       originalSize,
       compressedSize: originalSize,
-      timeMs: 0,
+      timeMs: performance.now() - startTime,
     };
   }
 
-  let compressed: Uint8Array;
-
-  switch (format) {
-    case 'zstd':
-      compressed = await compressZstd(data, options.level, options.useAdaptive);
-      break;
-    case 'lzma2':
-      // LZMA2 compressie (placeholder - zou lzma-js library nodig hebben)
-      // Voor nu fallback naar zstd met hoger level
-      compressed = await compressZstd(data, Math.min(options.level + 3, 22), options.useAdaptive);
-      break;
-    case 'brotli':
-      // Brotli compressie (placeholder - zou brotli library nodig hebben)
-      // Voor nu fallback naar zstd
-      compressed = await compressZstd(data, options.level, options.useAdaptive);
-      break;
-    default:
-      compressed = data;
-  }
-
+  // format === 'zstd'
+  const compressed = await compressZstd(data, options.level, options.useAdaptive);
   const endTime = performance.now();
 
-  // Controleer of compressie daadwerkelijk helpt
+  // Als compressie niet helpt, meld 'none' (compressZstd markeert de chunk
+  // zelf al als STORED, dus de data is hoe dan ook correct decodeerbaar).
   if (compressed.length >= data.length) {
     return {
-      data,
+      data: compressed,
       format: 'none',
       ratio: 1,
       originalSize,
-      compressedSize: originalSize,
+      compressedSize: compressed.length,
       timeMs: endTime - startTime,
     };
   }
 
   return {
     data: compressed,
-    format,
+    format: 'zstd',
     ratio: data.length / compressed.length,
     originalSize,
     compressedSize: compressed.length,
@@ -152,7 +123,7 @@ export async function compressMultiFormat(
 }
 
 /**
- * Decompress op basis van format
+ * Decompress op basis van formaat.
  */
 export async function decompressMultiFormat(
   data: Uint8Array,
@@ -161,12 +132,8 @@ export async function decompressMultiFormat(
 ): Promise<Uint8Array> {
   switch (format) {
     case 'zstd':
-      return decompressZstd(data, originalSize);
-    case 'lzma2':
-      // LZMA2 decompressie (placeholder)
-      return decompressZstd(data, originalSize);
-    case 'brotli':
-      // Brotli decompressie (placeholder)
+    case 'auto':
+      // 'auto' output is altijd zstd-gemarkeerd; decompressZstd leest de marker.
       return decompressZstd(data, originalSize);
     case 'none':
       return data;
@@ -176,7 +143,7 @@ export async function decompressMultiFormat(
 }
 
 /**
- * Compress preview - toon verwachte compressie ratio
+ * Compress preview - schat de verwachte compressie-ratio in.
  */
 export async function compressPreview(
   data: Uint8Array,
@@ -188,11 +155,8 @@ export async function compressPreview(
 
   const result = await compressMultiFormat(previewData, options);
 
-  // Extrapoler ratio voor volledig bestand
-  const estimatedRatio = result.ratio;
-
   return {
     format: result.format,
-    estimatedRatio,
+    estimatedRatio: result.ratio,
   };
 }
