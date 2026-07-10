@@ -2,14 +2,13 @@
  * MODULE: Memory Wipe
  *
  * Verantwoordelijkheid:
- *  - Secure memory wiping
- *  - Zero-fill memory buffers
- *  - Prevent data leakage
- *  - Memory tracking en cleanup
+ * - Secure memory wiping van Uint8Array buffers
+ * - Zero-fill buffers na gebruik
+ * - Memory tracking en cleanup
  *
  * Gebruikt door:
- *  - core/format/packer.ts
- *  - core/format/unpacker.ts
+ * - core/format/packer.ts
+ * - core/format/unpacker.ts
  *
  * @module core/security/memory-wipe
  */
@@ -85,29 +84,31 @@ export function clearMemoryTracker(): void {
 }
 
 /**
- * Wipe een Uint8Array met nullen (geoptimaliseerd)
+ * Wipe een Uint8Array met nullen (werkt echt: buffers zijn muteerbaar).
  */
 export function wipeBuffer(buffer: Uint8Array): void {
-  // Gebruik fill() voor betere performance dan loop
   buffer.fill(0);
 }
 
 /**
- * Wipe een string uit geheugen
- */
-export function wipeString(str: string): void {
-  // Strings zijn immutable in JavaScript, dus we kunnen ze niet direct wissen
-  // Maar we kunnen de referentie nullen
-  // In een echte implementatie zou je WebAssembly gebruiken voor secure memory
-}
-
-/**
- * Wipe alle data in een array van buffers (geoptimaliseerd)
+ * Wipe alle data in een array van buffers.
  */
 export function wipeBuffers(buffers: Uint8Array[]): void {
   for (const buffer of buffers) {
     buffer.fill(0);
   }
+}
+
+/**
+ * LET OP: dit is GEEN echte wipe.
+ *
+ * JavaScript-strings zijn immutable; hun onderliggende geheugen kan niet
+ * betrouwbaar worden overschreven vanuit JS. Deze functie bestaat alleen
+ * zodat callers hun intentie kunnen uitdrukken - vertrouw er NIET op voor
+ * security. Sla gevoelige data op in een Uint8Array en gebruik wipeBuffer.
+ */
+export function wipeString(_str: string): void {
+  // Bewust leeg: niet mogelijk in JS. Zie docstring hierboven.
 }
 
 /**
@@ -157,10 +158,13 @@ export class SecureMemory {
 }
 
 /**
- * Auto-delete timer voor bestanden
+ * Auto-delete timer voor bestanden.
+ * Gebruikt ReturnType<typeof setTimeout> zodat het type klopt in zowel
+ * browser (number) als Node (Timeout), i.p.v. het browser-onjuiste
+ * NodeJS.Timeout.
  */
 export class AutoDeleteTimer {
-  private timer: NodeJS.Timeout | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private callback: () => void;
 
   constructor(callback: () => void) {
@@ -169,7 +173,8 @@ export class AutoDeleteTimer {
 
   start(minutes: number): void {
     this.stop();
-    if (minutes > 0) {
+    // Guard tegen ongeldige/niet-eindige waarden.
+    if (Number.isFinite(minutes) && minutes > 0) {
       this.timer = setTimeout(this.callback, minutes * 60 * 1000);
     }
   }
